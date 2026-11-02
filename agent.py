@@ -7,16 +7,31 @@ import traceback
 import requests
 from urllib.parse import urlparse, parse_qs
 from google import genai
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-# استدعاء المفاتيح السرية
+# ==========================================
+# 1. استدعاء المفاتيح السرية من GitHub Secrets
+# ==========================================
 VIDEO_URL = os.getenv("VIDEO_URL", "").strip()
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+# مفاتيح فيسبوك (اختيارية)
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
 FB_TOKEN = os.getenv("FB_ACCESS_TOKEN", "").strip()
 
+# مفاتيح يوتيوب (اختيارية)
+YT_CLIENT_ID = os.getenv("YT_CLIENT_ID", "").strip()
+YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET", "").strip()
+YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "").strip()
 
+
+# ==========================================
+# 2. دوال إرسال الرسائل والفيديو إلى تيليجرام
+# ==========================================
 def send_telegram(msg):
     """إرسال رسالة نصية إلى تيليجرام مع طباعتها في سجل GitHub"""
     print(msg)
@@ -45,6 +60,9 @@ def send_telegram_video(video_path, caption=""):
         )
 
 
+# ==========================================
+# 3. دوال استخراج معرف ونص الفيديو (ثلاثية المراحل)
+# ==========================================
 def extract_video_id(url):
     """استخراج معرف الفيديو من جميع صيغ روابط يوتيوب"""
     parsed = urlparse(url)
@@ -77,7 +95,6 @@ def get_transcript(video_id, url):
         if sub_files:
             with open(sub_files[0], "r", encoding="utf-8") as f:
                 raw_vtt = f.read()
-            # تنظيف ملف الـ VTT من الأكواد المكررة
             clean_text = re.sub(r'<[^>]+>', '', raw_vtt)
             lines = []
             for line in clean_text.splitlines():
@@ -117,8 +134,11 @@ def get_transcript(video_id, url):
         return f"رابط الفيديو: {url}"
 
 
+# ==========================================
+# 4. دالة الذكاء الاصطناعي وتوليد السيو (Gemini 3.1)
+# ==========================================
 def analyze_with_gemini(transcript_text, video_url):
-    """تحليل النص وتوليد جميع عناصر السيو ومنشورات Quora عبر Gemini 3.8 Flash"""
+    """تحليل النص وتوليد جميع عناصر السيو ومنشورات Quora عبر Gemini 3.1"""
     if not GEMINI_KEY:
         raise ValueError("مفتاح GEMINI_API_KEY غير موجود في GitHub Secrets!")
 
@@ -139,8 +159,13 @@ def analyze_with_gemini(transcript_text, video_url):
     8. "quora_en": منشور احترافي لمنصة Quora باللغة الإنجليزية يلتزم بسياسة النشر، مدمج بداخل نصه رابط الفيديو ({video_url})، ويحتوي على هاشتاج واحد فقط.
     """
     
-    # استخدام أحدث نموذج مدعوم مع fallback تلقائي
-    models_to_try = ['gemini-3.8-flash', 'gemini-3-flash', 'gemini-2.5-pro']
+    # قائمة النماذج الحديثة المعتمدة مع التبديل التلقائي الذكي
+    models_to_try = [
+        'gemini-3.1-pro-preview',
+        'gemini-3.1-flash-preview',
+        'gemini-3.1-flash-lite-preview',
+        'gemini-3-flash-preview'
+    ]
     last_err = None
     
     for model_name in models_to_try:
@@ -159,6 +184,9 @@ def analyze_with_gemini(transcript_text, video_url):
     raise last_err
 
 
+# ==========================================
+# 5. دالة التحميل والمونتاج إلى ريلز (9:16)
+# ==========================================
 def download_and_convert_to_reel(url, start_sec, end_sec):
     """تحميل الفيديو وقصه وتحويله إلى 9:16 بمحاكاة عميل Android VR لتخطي الحظر"""
     cmd = [
@@ -189,6 +217,68 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
     subprocess.run(ffmpeg_cmd, check=True)
 
 
+# ==========================================
+# 6. دوال النشر التلقائي (فيسبوك + يوتيوب)
+# ==========================================
+def upload_to_facebook(video_path, title, description):
+    """رفع الفيديو على صفحة فيسبوك عبر Graph API"""
+    if not FB_PAGE_ID or not FB_TOKEN:
+        return "⏭️ فيسبوك: لم يتم ضبط المفاتيح بعد (تم التخطي)."
+    
+    try:
+        url = f"https://graph-video.facebook.com/v21.0/{FB_PAGE_ID}/videos"
+        caption = f"{title}\n\n{description}"
+        with open(video_path, 'rb') as f:
+            files = {'source': f}
+            data = {'title': title, 'description': caption, 'access_token': FB_TOKEN}
+            r = requests.post(url, files=files, data=data, timeout=120)
+        if r.status_code == 200:
+            return "✅ فيسبوك: تم النشر بنجاح!"
+        return f"⚠️ فيسبوك: فشل الرفع ({r.text})"
+    except Exception as e:
+        return f"❌ فيسبوك خطأ: {str(e)}"
+
+
+def upload_to_youtube(video_path, title, description, tags_str):
+    """رفع الفيديو كـ YouTube Shorts مع العنوان والوصف والتاجز"""
+    if not YT_CLIENT_ID or not YT_CLIENT_SECRET or not YT_REFRESH_TOKEN:
+        return "⏭️ يوتيوب: لم يتم ضبط المفاتيح بعد (تم التخطي)."
+    
+    try:
+        creds = Credentials(
+            None,
+            refresh_token=YT_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=YT_CLIENT_ID,
+            client_secret=YT_CLIENT_SECRET
+        )
+        youtube = build("youtube", "v3", credentials=creds)
+        clean_tags = [t.strip() for t in tags_str[:490].split(",") if t.strip()]
+        
+        body = {
+            "snippet": {
+                "title": title[:100],
+                "description": description,
+                "tags": clean_tags,
+                "categoryId": "22"
+            },
+            "status": {
+                "privacyStatus": "public",
+                "selfDeclaredMadeForKids": False
+            }
+        }
+        
+        media = MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        response = request.execute()
+        return f"✅ يوتيوب: تم النشر بنجاح! (https://youtu.be/{response['id']})"
+    except Exception as e:
+        return f"❌ يوتيوب خطأ: {str(e)}"
+
+
+# ==========================================
+# 7. نقطة التشغيل الرئيسية (Main Execution)
+# ==========================================
 if __name__ == "__main__":
     try:
         if not VIDEO_URL:
@@ -200,7 +290,7 @@ if __name__ == "__main__":
         vid_id = extract_video_id(VIDEO_URL)
         transcript = get_transcript(vid_id, VIDEO_URL)
         
-        # 2. تحليل المحتوى وتوليد السيو عبر Gemini
+        # 2. تحليل المحتوى وتوليد السيو عبر Gemini 3.1
         data = analyze_with_gemini(transcript, VIDEO_URL)
         tags_500 = data['tags_string'][:495]
         chosen_title = data['short_titles'][0]
@@ -225,12 +315,15 @@ if __name__ == "__main__":
         send_telegram(f"🇪🇬 منشور Quora (عربي):\n\n{data['quora_ar']}")
         send_telegram(f"🇺🇸 منشور Quora (إنجليزي):\n\n{data['quora_en']}")
         
-        # 4. محاولة تحميل وقص الفيديو
+        # 4. محاولة تحميل وقص الفيديو والنشر
         try:
             send_telegram(f"🎬 جاري تحميل الفيديو وقص اللقطة من الثانية ({data['start_time']}) إلى ({data['end_time']})...")
             download_and_convert_to_reel(VIDEO_URL, data['start_time'], data['end_time'])
             send_telegram_video("output_reel.mp4", caption=f"{chosen_title}\n\n{description_block}")
-            send_telegram("✅ تم قص وإرسال فيديو الريلز بنجاح!")
+            
+            fb_res = upload_to_facebook("output_reel.mp4", chosen_title, description_block)
+            yt_res = upload_to_youtube("output_reel.mp4", chosen_title, description_block, tags_500)
+            send_telegram(f"✅ اكتملت المهمة بنجاح!\n{fb_res}\n{yt_res}")
         except Exception as vid_err:
             send_telegram(f"⚠️ تم إرسال السيو بالكامل أعلاه، لكن يوتيوب طلب كوكيز لتحميل ملف الـ MP4:\n{str(vid_err)}")
 
