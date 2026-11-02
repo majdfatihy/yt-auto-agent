@@ -4,6 +4,10 @@ import glob
 import json
 import subprocess
 import traceback
+import time
+import shutil
+from pathlib import Path
+from urllib.parse import unquote
 import requests
 from urllib.parse import urlparse, parse_qs
 from google import genai
@@ -34,7 +38,7 @@ COOKIES_FILE = None
 if YT_COOKIES:
     COOKIES_FILE = "cookies.txt"
     with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-        f.write(YT_COOKIES + "\n")
+        f.write(YT_COOKIES.replace("\\n", "\n") + "\n")
 
 
 # ==========================================
@@ -99,10 +103,10 @@ def get_transcript(video_id, url):
         if COOKIES_FILE:
             cmd.extend(["--cookies", COOKIES_FILE])
         else:
-            cmd.extend(["--extractor-args", "youtube:player_client=android_vr,tv,web"])
+            pass  # Let updated yt-dlp choose supported default clients
         cmd.append(url)
         
-        subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=65)
         sub_files = glob.glob("sub_file*.vtt")
         if sub_files:
             with open(sub_files[0], "r", encoding="utf-8") as f:
@@ -199,40 +203,54 @@ def analyze_with_gemini(transcript_text, video_url):
 # 5. دالة التحميل والمونتاج إلى ريلز (9:16)
 # ==========================================
 def download_and_convert_to_reel(url, start_sec, end_sec):
-    """تحميل الفيديو باستخدام الكوكيز وقصه وتحويله إلى أبعاد 9:16"""
-    cmd = [
-        "yt-dlp",
-        "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
-        "-o", "input.mp4"
-    ]
-    
-    if COOKIES_FILE:
-        print("✅ جاري استخدام ملف الكوكيز لتخطي تحقق يوتيوب...")
-        cmd.extend(["--cookies", COOKIES_FILE])
+    """Download with bounded retries, or accept a Telegram-supplied local MP4."""
+    source = Path(os.getenv("SOURCE_VIDEO_FILE", "").strip())
+    target = Path("input.mp4")
+    if source.is_file():
+        shutil.copyfile(source, target)
     else:
-        cmd.extend(["--extractor-args", "youtube:player_client=tv_embedded,android_vr,web"])
-        
-    cmd.append(url)
-    
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        raise RuntimeError(f"فشل تحميل الفيديو:\n{res.stderr[-350:]}")
-    
-    duration = int(end_sec) - int(start_sec)
-    if duration <= 10 or duration > 59:
-        start_sec, duration = 0, 45
-
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-ss", str(start_sec),
-        "-i", "input.mp4",
-        "-t", str(duration),
-        "-vf", "crop=ih*9/16:ih,scale=1080:1920",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
-        "output_reel.mp4"
-    ]
-    subprocess.run(ffmpeg_cmd, check=True)
+        cmd = ["yt-dlp", "--no-playlist", "--no-progress", "--newline",
+               "--retries", "3", "--fragment-retries", "3", "--socket-timeout", "25",
+               "--merge-output-format", "mp4", "-f",
+               "bv*[height<=1080]+ba/b[height<=1080]/b", "-o", "input.%(ext)s"]
+        if COOKIES_FILE:
+            cmd += ["--cookies", COOKIES_FILE]
+        # Keep client selection managed by yt-dlp defaults; use PO-token provider only if configured.
+        cmd.append(url)
+        last_error = ""
+        for attempt in range(2):
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode == 0:
+                candidates = [x for x in Path('.').glob('input.*') if x.suffix.lower() in ('.mp4','.mkv','.webm')]
+                if candidates:
+                    target = candidates[0]
+                    break
+            last_error = (result.stderr or result.stdout)[-1400:]
+            if any(marker in last_error.lower() for marker in ('sign in to confirm', 'this helps protect our community', 'cookies for the authentication')):
+                raise RuntimeError('YOUTUBE_AUTH_REQUIRED: YouTube requires session verification. Provide a permitted source MP4 via SOURCE_VIDEO_FILE or valid account cookies. ' + last_error[-350:])
+            if '403' in last_error or 'po token' in last_error.lower():
+                raise RuntimeError('YOUTUBE_ACCESS_RESTRICTED: Check PO Token provider / IP restrictions and yt-dlp verbose log. ' + last_error[-600:])
+            time.sleep(3 * (attempt + 1))
+        else:
+            raise RuntimeError('VIDEO_DOWNLOAD_FAILED: ' + last_error[-700:])
+    probe = subprocess.run(['ffprobe','-v','error','-show_entries','format=duration',
+                            '-of','default=noprint_wrappers=1:nokey=1',str(target)],
+                           capture_output=True,text=True,check=True)
+    length = float(probe.stdout.strip())
+    start = max(0, int(start_sec))
+    duration = int(end_sec) - start
+    if duration < 11 or duration > 59 or start >= length:
+        raise ValueError(f'Invalid reel interval: start={start}, end={end_sec}, source duration={length:.1f}')
+    duration = min(duration, length-start)
+    if duration < 10:
+        raise ValueError('Source video is too short for the requested reel interval')
+    ffmpeg_cmd = ['ffmpeg','-hide_banner','-y','-ss',str(start),'-i',str(target),'-t',str(duration),
+                  '-vf','scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
+                  '-c:v','libx264','-preset','fast','-crf','23','-pix_fmt','yuv420p',
+                  '-c:a','aac','-b:a','128k','-movflags','+faststart','output_reel.mp4']
+    subprocess.run(ffmpeg_cmd,check=True,timeout=900)
+    if not Path('output_reel.mp4').is_file() or Path('output_reel.mp4').stat().st_size < 10000:
+        raise RuntimeError('Output MP4 missing or empty')
 
 
 # ==========================================
@@ -281,14 +299,16 @@ def upload_to_youtube(video_path, title, description, tags_str):
                 "categoryId": "22"
             },
             "status": {
-                "privacyStatus": "public",
+                "privacyStatus": os.getenv("YT_PRIVACY_STATUS", "private"),
                 "selfDeclaredMadeForKids": False
             }
         }
         
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
         request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-        response = request.execute()
+        response = None
+        while response is None:
+            _, response = request.next_chunk()
         return f"✅ يوتيوب: تم النشر بنجاح! (https://youtu.be/{response['id']})"
     except Exception as e:
         return f"❌ يوتيوب خطأ: {str(e)}"
@@ -344,6 +364,7 @@ if __name__ == "__main__":
             send_telegram(f"🚀 ملخص النشر التلقائي:\n{fb_res}\n{yt_res}")
         except Exception as vid_err:
             send_telegram(f"⚠️ تم إرسال السيو بالكامل أعلاه، لكن حدث عائق أثناء تحميل/قص ملف الـ MP4:\n{str(vid_err)}")
+            raise
 
     except Exception as e:
         err_trace = traceback.format_exc()
