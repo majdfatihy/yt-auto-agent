@@ -18,15 +18,23 @@ VIDEO_URL = os.getenv("VIDEO_URL", "").strip()
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+YT_COOKIES = os.getenv("YT_COOKIES", "").strip()
 
 # مفاتيح فيسبوك (اختيارية)
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
 FB_TOKEN = os.getenv("FB_ACCESS_TOKEN", "").strip()
 
-# مفاتيح يوتيوب (اختيارية)
+# مفاتيح يوتيوب (لرفع الفيديو تلقائياً على قناتك)
 YT_CLIENT_ID = os.getenv("YT_CLIENT_ID", "").strip()
 YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET", "").strip()
 YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "").strip()
+
+# تجهيز ملف الكوكيز إذا كان موجوداً في الخزنة
+COOKIES_FILE = None
+if YT_COOKIES:
+    COOKIES_FILE = "cookies.txt"
+    with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+        f.write(YT_COOKIES + "\n")
 
 
 # ==========================================
@@ -77,20 +85,24 @@ def extract_video_id(url):
 
 
 def get_transcript(video_id, url):
-    """محرك ثلاثي المراحل لسحب النص والترجمة وتخطي حظر IP السحابة مجاناً"""
+    """محرك ثلاثي المراحل لسحب النص والترجمة وتخطي حظر IP السحابة"""
     
-    # المرحلة 1: استخدام yt-dlp بمحاكاة تطبيق Android TV لسحب ملف الترجمة
+    # المرحلة 1: استخدام yt-dlp (مع الكوكيز إن وجدت) لسحب ملف الترجمة
     try:
         cmd = [
             "yt-dlp",
-            "--extractor-args", "youtube:player_client=android_vr,tv,web",
             "--write-auto-sub", "--write-sub",
             "--sub-langs", "ar,en",
             "--skip-download",
-            "-o", "sub_file",
-            url
+            "-o", "sub_file"
         ]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if COOKIES_FILE:
+            cmd.extend(["--cookies", COOKIES_FILE])
+        else:
+            cmd.extend(["--extractor-args", "youtube:player_client=android_vr,tv,web"])
+        cmd.append(url)
+        
+        subprocess.run(cmd, capture_output=True, text=True, timeout=35)
         sub_files = glob.glob("sub_file*.vtt")
         if sub_files:
             with open(sub_files[0], "r", encoding="utf-8") as f:
@@ -102,12 +114,12 @@ def get_transcript(video_id, url):
                     if not lines or lines[-1] != line.strip():
                         lines.append(line.strip())
             if lines:
-                print("✅ تم سحب الكابشن بنجاح عبر المرحلة الأولى (Android TV Client)")
+                print("✅ تم سحب الكابشن بنجاح عبر المرحلة الأولى (yt-dlp)")
                 return "\n".join(lines)[:20000]
     except Exception as e:
         print(f"Stage 1 sub failed: {e}")
 
-    # المرحلة 2: استخدام خوادم Invidious البديلة (تتخطى حظر IP يوتيوب تماماً)
+    # المرحلة 2: استخدام خوادم Invidious البديلة
     invidious_instances = [
         "https://inv.tux.pizza",
         "https://invidious.nerdvpn.de",
@@ -125,7 +137,7 @@ def get_transcript(video_id, url):
         except Exception:
             continue
 
-    # المرحلة 3: خطة الطوارئ عبر NoEmbed (لا تُحظر أبداً من يوتيوب)
+    # المرحلة 3: خطة الطوارئ عبر NoEmbed
     try:
         r = requests.get(f"https://noembed.com/embed?url=https://www.youtube.com/watch?v={video_id}", timeout=10).json()
         print("✅ تم سحب العنوان عبر المرحلة الثالثة (NoEmbed)")
@@ -159,7 +171,6 @@ def analyze_with_gemini(transcript_text, video_url):
     8. "quora_en": منشور احترافي لمنصة Quora باللغة الإنجليزية يلتزم بسياسة النشر، مدمج بداخل نصه رابط الفيديو ({video_url})، ويحتوي على هاشتاج واحد فقط.
     """
     
-    # قائمة النماذج الحديثة المعتمدة مع التبديل التلقائي الذكي
     models_to_try = [
         'gemini-3.1-pro-preview',
         'gemini-3.1-flash-preview',
@@ -188,17 +199,24 @@ def analyze_with_gemini(transcript_text, video_url):
 # 5. دالة التحميل والمونتاج إلى ريلز (9:16)
 # ==========================================
 def download_and_convert_to_reel(url, start_sec, end_sec):
-    """تحميل الفيديو وقصه وتحويله إلى 9:16 بمحاكاة عميل Android VR لتخطي الحظر"""
+    """تحميل الفيديو باستخدام الكوكيز وقصه وتحويله إلى أبعاد 9:16"""
     cmd = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=android_vr,tv,android",
         "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
-        "-o", "input.mp4",
-        url
+        "-o", "input.mp4"
     ]
+    
+    if COOKIES_FILE:
+        print("✅ جاري استخدام ملف الكوكيز لتخطي تحقق يوتيوب...")
+        cmd.extend(["--cookies", COOKIES_FILE])
+    else:
+        cmd.extend(["--extractor-args", "youtube:player_client=tv_embedded,android_vr,web"])
+        
+    cmd.append(url)
+    
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(f"يوتيوب طلب التحقق (Bot Check) لتحميل ملف الفيديو:\n{res.stderr[-300:]}")
+        raise RuntimeError(f"فشل تحميل الفيديو:\n{res.stderr[-350:]}")
     
     duration = int(end_sec) - int(start_sec)
     if duration <= 10 or duration > 59:
@@ -315,7 +333,7 @@ if __name__ == "__main__":
         send_telegram(f"🇪🇬 منشور Quora (عربي):\n\n{data['quora_ar']}")
         send_telegram(f"🇺🇸 منشور Quora (إنجليزي):\n\n{data['quora_en']}")
         
-        # 4. محاولة تحميل وقص الفيديو والنشر
+        # 4. تحميل وقص الفيديو والنشر التلقائي
         try:
             send_telegram(f"🎬 جاري تحميل الفيديو وقص اللقطة من الثانية ({data['start_time']}) إلى ({data['end_time']})...")
             download_and_convert_to_reel(VIDEO_URL, data['start_time'], data['end_time'])
@@ -323,9 +341,9 @@ if __name__ == "__main__":
             
             fb_res = upload_to_facebook("output_reel.mp4", chosen_title, description_block)
             yt_res = upload_to_youtube("output_reel.mp4", chosen_title, description_block, tags_500)
-            send_telegram(f"✅ اكتملت المهمة بنجاح!\n{fb_res}\n{yt_res}")
+            send_telegram(f"🚀 ملخص النشر التلقائي:\n{fb_res}\n{yt_res}")
         except Exception as vid_err:
-            send_telegram(f"⚠️ تم إرسال السيو بالكامل أعلاه، لكن يوتيوب طلب كوكيز لتحميل ملف الـ MP4:\n{str(vid_err)}")
+            send_telegram(f"⚠️ تم إرسال السيو بالكامل أعلاه، لكن حدث عائق أثناء تحميل/قص ملف الـ MP4:\n{str(vid_err)}")
 
     except Exception as e:
         err_trace = traceback.format_exc()
