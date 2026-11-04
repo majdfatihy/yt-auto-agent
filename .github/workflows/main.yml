@@ -40,6 +40,8 @@ jobs:
         env:
           VIDEO_URL: ${{ github.event.client_payload.video_url || github.event.inputs.video_url }}
           AGENT_ACTION: ${{ github.event.client_payload.agent_action || 'prepare' }}
+          CLIP_IDS: ${{ github.event.client_payload.clip_ids || '' }}
+          CLIP_PLAN_REF: ${{ github.event.client_payload.clip_plan_ref || '' }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}

@@ -236,6 +236,88 @@ def format_clip_plan(plan):
         lines.append("")
     if plan["method"] != "gemini":
         lines.append("ملاحظة: بعض العناوين مقتطفات حرفية من التفريغ لأن التحليل الذكي لم يوفر اقتراحات كافية.")
-    lines.append("تم حفظ الاقتراحات. اختيار الأرقام وإنتاج المعاينة سيُفعّلان في المرحلة الثانية.")
+    lines.append("للمعاينة: أرسل رقمًا مثل 1 أو عدة أرقام مثل 1,3 أو /clip 1,3.")
     lines.append("لم يُقص أو يُنشر أي فيديو.")
     return "\n".join(lines)
+
+
+# Stage 2: explicit, validated selections; no publishing in this module.
+def plan_reference(plan):
+    """Unique UTC plan identity, shared by the Cloudflare webhook and GitHub runner.
+
+    The selected source and Telegram file ID are checked separately.
+    """
+    reference = plan.get('created_utc') if isinstance(plan, dict) else None
+    if not isinstance(reference, str) or len(reference) < 20 or len(reference) > 50:
+        raise ValueError('CLIP_PLAN_REF_INVALID')
+    return reference
+
+
+def parse_clip_choices(value, plan):
+    """Allow `1`, `1,3`, `١،٣`, or `1.2.3`; reject arbitrary text and unknown IDs."""
+    if plan.get('status') not in ('awaiting_selection', 'previewed_awaiting_approval'):
+        raise ValueError('قائمة الاقتراحات ليست متاحة للاختيار. أرسل /prepare أولًا.')
+    text = str(value).strip().translate(str.maketrans(
+        '٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'))
+    if not re.fullmatch(r'[0-9]+(?:[\s,،.]+[0-9]+)*', text):
+        raise ValueError('صيغة الاختيار غير صحيحة. استخدم 1 أو 1,3 أو /clip 1,3.')
+    raw_ids = [int(token) for token in re.split(r'[\s,،.]+', text)]
+    entries = plan.get('clips', [])
+    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_PROPOSALS:
+        raise ValueError('قائمة الاقتراحات غير صالحة')
+    try:
+        source_seconds = float(plan['duration'])
+    except (ValueError, TypeError, KeyError):
+        raise ValueError('مدة المصدر غير صالحة') from None
+    if not math.isfinite(source_seconds) or source_seconds < MIN_CLIP_SECONDS:
+        raise ValueError('مدة المصدر غير صالحة')
+    valid_ids = set()
+    for clip in entries:
+        if not isinstance(clip, dict) or type(clip.get('id')) is not int or clip['id'] in valid_ids:
+            raise ValueError('ترقيم اقتراحات القص غير صالح')
+        if not isinstance(clip.get('title'), str) or not clip['title'].strip() or len(clip['title']) > 95:
+            raise ValueError('عنوان مقطع غير صالح')
+        try:
+            start, end = float(clip['start_time']), float(clip['end_time'])
+        except (TypeError, ValueError, KeyError):
+            raise ValueError('توقيت مقطع غير صالح') from None
+        if (not math.isfinite(start) or not math.isfinite(end) or start < 0
+                or end > source_seconds + 0.11 or not MIN_CLIP_SECONDS <= end - start <= MAX_CLIP_SECONDS + 0.01):
+            raise ValueError('توقيت مقطع خارج حدود الفيديو')
+        valid_ids.add(clip['id'])
+    if (not valid_ids or len(raw_ids) > MAX_PROPOSALS or len(set(raw_ids)) != len(raw_ids)
+            or any(i not in valid_ids for i in raw_ids)):
+        raise ValueError('رقم مقطع غير موجود في الاقتراحات المحفوظة. استخدم /prepare لعرض قائمة جديدة.')
+    return raw_ids
+
+
+def load_clip_plan():
+    token = os.getenv('GH_PAT', '').strip()
+    repo = os.getenv('GITHUB_REPOSITORY', '').strip()
+    if not token or not repo:
+        raise RuntimeError('CLIP_PLAN_STORAGE_NOT_CONFIGURED: GH_PAT/GITHUB_REPOSITORY missing')
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
+               'X-GitHub-Api-Version': '2022-11-28'}
+    response = requests.get(f'https://api.github.com/repos/{repo}/actions/variables/{PLAN_VARIABLE}',
+                            headers=headers, timeout=20)
+    if response.status_code == 404:
+        raise ValueError('لا توجد اقتراحات محفوظة. استخدم /prepare أولًا.')
+    response.raise_for_status()
+    try:
+        plan = json.loads(response.json()['value'])
+    except (ValueError, KeyError, TypeError) as error:
+        raise RuntimeError('CLIP_PLAN_INVALID_JSON') from error
+    if not isinstance(plan, dict) or not isinstance(plan.get('clips'), list):
+        raise ValueError('قائمة الاقتراحات غير صالحة. أعد /prepare.')
+    return plan
+
+
+def record_preview_result(expected_reference, clip_ids):
+    """Avoid overwriting a newer /prepare list after rendering an old selection."""
+    latest = load_clip_plan()
+    if plan_reference(latest) != expected_reference:
+        raise RuntimeError('CLIP_PLAN_CHANGED: new suggestions were saved during rendering')
+    latest['status'] = 'previewed_awaiting_approval'
+    latest['previewed_ids'] = clip_ids
+    latest['previewed_utc'] = datetime.now(timezone.utc).isoformat()
+    save_clip_plan(latest)

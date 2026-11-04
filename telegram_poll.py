@@ -3,6 +3,7 @@ import json
 import os
 import re
 import requests
+from clip_planner import parse_clip_choices, plan_reference
 
 TOKEN = os.environ['TELEGRAM_TOKEN']
 CHAT = str(os.environ['TELEGRAM_CHAT_ID'])
@@ -55,15 +56,16 @@ def get_mp4(msg):
 
 def send_menu():
     telegram('sendMessage', chat_id=CHAT, text=(
-        'لوحة تحكم الوكيل — المرحلة الأولى\n'
+        'لوحة تحكم الوكيل — اختيار ومعاينة\n'
         '1) أرسل رابط يوتيوب أو MP4 مع رابطه لحفظ المصدر فقط.\n'
-        '2) /prepare — اقتراح مقاطع بعناوين وتوقيتات فقط، بدون قص.\n'
-        '3) /seo — توليد بيانات وصفية فقط من آخر مصدر.\n'
-        '4) /publish — متوقف حتى إتاحة اختيار المقطع والمعاينة والموافقة.\n'
-        '5) /status — عرض المصدر المحفوظ.\n'
-        '6) /cancel — إلغاء المصدر المحفوظ.\n'
+        '2) /prepare — اقتراح مقاطع بعناوين وتوقيتات فقط.\n'
+        '3) أرسل 1 أو 1,3 أو /clip 1,3 لمعاينة المقاطع المختارة.\n'
+        '4) /seo — توليد بيانات وصفية عند الطلب فقط.\n'
+        '5) /publish — متوقف حتى الموافقة الصريحة.\n'
+        '6) /status — عرض المصدر المحفوظ.\n'
+        '7) /cancel — إلغاء المصدر المحفوظ والاقتراحات.\n'
         'يمكنك أيضًا إرسال /prepare أو /seo أو /publish متبوعًا برابط يوتيوب.\n'
-        'مهم: المرحلة الحالية اقتراح فقط، ولا يوجد قص أو نشر.'))
+        'مهم: الاختيار ينتج معاينة خاصة فقط، ولا يوجد نشر.'))
 
 
 def read_source():
@@ -86,8 +88,10 @@ def clear_clip_plan():
         set_variable('TELEGRAM_CLIP_PROPOSALS', '{}', True)
 
 
-def dispatch(link, media, action, request_message_id):
+def dispatch(link, media, action, request_message_id, extra_payload=None):
     payload = {'video_url': link, 'agent_action': action}
+    if extra_payload:
+        payload.update(extra_payload)
     if media:
         size = media.get('file_size', 0)
         if size > MAX_FILE:
@@ -141,11 +145,36 @@ def main():
             telegram('sendMessage', chat_id=CHAT, text='تم إلغاء المصدر والاقتراحات المحفوظة. لم يُنشر شيء.')
         elif command == '/status':
             telegram('sendMessage', chat_id=CHAT, text='آخر مصدر محفوظ: ' + (source.get('video_url') or 'لا يوجد'))
+        elif command == '/clip' or re.fullmatch(r'[0-9٠-٩۰-۹]+(?:[\s,،.]+[0-9٠-٩۰-۹]+)*', text):
+            choice_text = text[len(text.split()[0]):].strip() if command == '/clip' else text
+            raw, _ = get_variable('TELEGRAM_CLIP_PROPOSALS', '{}')
+            try:
+                plan = json.loads(raw)
+                if not isinstance(plan, dict) or not plan.get('clips'):
+                    raise ValueError('لا توجد اقتراحات محفوظة. أرسل /prepare أولًا.')
+                if (source.get('video_url') != plan.get('video_url') or
+                        source.get('telegram_file_id', '') != plan.get('telegram_file_id', '')):
+                    raise ValueError('الاقتراحات لا تتطابق مع المصدر الحالي. أرسل /prepare مرة أخرى.')
+                chosen_ids = parse_clip_choices(choice_text, plan)
+                reference = plan_reference(plan)
+            except (ValueError, TypeError) as error:
+                telegram('sendMessage', chat_id=CHAT, text=str(error))
+            else:
+                selected_file = {'file_id': plan['telegram_file_id']} if plan.get('telegram_file_id') else None
+                dispatched = dispatch(plan['video_url'], selected_file, 'preview', request_message_id,
+                                      {'clip_ids': ','.join(map(str, chosen_ids)), 'clip_plan_ref': reference})
+                if dispatched:
+                    telegram('sendMessage', chat_id=CHAT,
+                             text='تم طلب معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)) +
+                                  '. سيصل كل فيديو منفصلًا، ولن يُنشر على يوتيوب.')
         elif command == '/publish':
             telegram('sendMessage', chat_id=CHAT, text='⛔ النشر متوقف مؤقتًا. لازم تختار المقطع وتراجع المعاينة وتوافق قبل النشر.')
         elif command in ('/prepare', '/seo'):
             action = {'/prepare':'prepare', '/seo':'seo'}[command]
             selected = {'video_url':link, 'telegram_file_id':media.get('file_id') if media else ''} if link else source
+            if action == 'prepare' and selected.get('video_url'):
+                save_source(selected, source_exists)
+                clear_clip_plan()
             if not selected.get('video_url'):
                 telegram('sendMessage', chat_id=CHAT, text='أرسل رابط فيديو أو MP4 مع رابطه أولًا، ثم أرسل الأمر المطلوب.')
             else:

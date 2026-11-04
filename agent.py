@@ -1,4 +1,5 @@
 import os
+import math
 import re
 import glob
 import json
@@ -12,7 +13,8 @@ import requests
 from urllib.parse import urlparse, parse_qs
 from google import genai
 from transcription_pipeline import obtain_timed_transcript, cues_to_text, clip_has_coverage, save_captions
-from clip_planner import build_clip_plan, format_clip_plan, save_clip_plan, source_duration
+from clip_planner import (build_clip_plan, format_clip_plan, save_clip_plan, source_duration,
+                          load_clip_plan, plan_reference, parse_clip_choices, record_preview_result)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -103,16 +105,24 @@ def send_telegram(msg):
 
 def send_telegram_video(video_path, caption=""):
     """إرسال فيديو الريلز المقصوص إلى تيليجرام"""
-    if not TG_TOKEN or not TG_CHAT_ID or not os.path.exists(video_path):
-        return
+    if not TG_TOKEN or not TG_CHAT_ID:
+        raise RuntimeError("TELEGRAM_PREVIEW_DELIVERY_NOT_CONFIGURED")
+    if not os.path.isfile(video_path):
+        raise RuntimeError("TELEGRAM_PREVIEW_VIDEO_MISSING")
+    if os.path.getsize(video_path) > 50 * 1024 * 1024:
+        raise RuntimeError("TELEGRAM_PREVIEW_VIDEO_TOO_LARGE: >50MB")
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo"
     with open(video_path, 'rb') as video_file:
-        requests.post(
+        response = requests.post(
             url,
-            data={"chat_id": TG_CHAT_ID, "caption": caption[:1000]},
+            data={"chat_id": TG_CHAT_ID, "caption": caption[:1000], "supports_streaming": "true"},
             files={"video": video_file},
             timeout=120
         )
+    response.raise_for_status()
+    if not response.json().get('ok'):
+        raise RuntimeError('TELEGRAM_PREVIEW_DELIVERY_REJECTED')
+    print(f'PREVIEW_DELIVERED: YES; BYTES: {os.path.getsize(video_path)}')
 
 
 # ==========================================
@@ -309,7 +319,8 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
     source = Path(os.getenv("SOURCE_VIDEO_FILE", "").strip())
     target = Path("input.mp4")
     if source.is_file():
-        shutil.copyfile(source, target)
+        if source.resolve() != target.resolve():
+            shutil.copyfile(source, target)
         print("SOURCE: LOCAL_MP4; YOUTUBE_DOWNLOAD: SKIPPED")
     else:
         if os.getenv("TELEGRAM_FILE_ID", "").strip():
@@ -343,12 +354,14 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
                             '-of','default=noprint_wrappers=1:nokey=1',str(target)],
                            capture_output=True,text=True,check=True)
     length = float(probe.stdout.strip())
-    start = max(0, int(start_sec))
-    duration = int(end_sec) - start
-    if duration < 11 or duration > 59 or start >= length:
-        raise ValueError(f'Invalid reel interval: start={start}, end={end_sec}, source duration={length:.1f}')
+    start, end = float(start_sec), float(end_sec)
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise ValueError('Invalid reel interval: non-finite timestamp')
+    duration = end - start
+    if start < 0 or start >= length or duration < 15 or duration > 59 or end > length + 0.15:
+        raise ValueError(f'Invalid reel interval: start={start}, end={end}, source duration={length:.1f}')
     duration = min(duration, length-start)
-    if duration < 10:
+    if duration < 14.9:
         raise ValueError('Source video is too short for the requested reel interval')
     ffmpeg_cmd = ['ffmpeg','-hide_banner','-y','-ss',str(start),'-i',str(target),'-t',str(duration),
                   '-vf','scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
@@ -428,10 +441,45 @@ if __name__ == "__main__":
         if not VIDEO_URL:
             raise ValueError("لم يتم إدخال رابط الفيديو (VIDEO_URL فارغ)!")
 
-        if AGENT_ACTION not in ('seo', 'prepare', 'publish'):
+        if AGENT_ACTION not in ('seo', 'prepare', 'publish', 'preview'):
             raise ValueError('Unsupported AGENT_ACTION; refusing to publish')
+        # Publishing is not activated until the separate final approval stage.
+        if AGENT_ACTION == 'publish':
+            send_telegram('⛔ النشر متوقف لحين تفعيل الموافقة الصريحة على المعاينة.')
+            raise SystemExit(0)
+
+        # Stage 2: resolve existing proposal, validate exact source and IDs, render ONLY selection.
+        if AGENT_ACTION == 'preview':
+            plan = load_clip_plan()
+            expected_ref = os.getenv('CLIP_PLAN_REF', '').strip()
+            if not expected_ref or plan_reference(plan) != expected_ref:
+                raise RuntimeError('CLIP_PLAN_STALE: requested selection no longer matches the saved suggestions')
+            if VIDEO_URL != plan.get('video_url') or TELEGRAM_FILE_ID != plan.get('telegram_file_id', ''):
+                raise RuntimeError('CLIP_SOURCE_MISMATCH: request and saved plan have different sources')
+            chosen_ids = parse_clip_choices(os.getenv('CLIP_IDS', ''), plan)
+            clips_by_id = {item['id']: item for item in plan['clips']}
+            send_telegram('بدأ تجهيز معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)))
+            fetch_telegram_source()
+            for clip_id in chosen_ids:
+                if plan_reference(load_clip_plan()) != expected_ref:
+                    raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
+                clip = clips_by_id[clip_id]
+                download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'])
+                # Reuse input.mp4 in this same runner for any subsequent selection.
+                if Path('input.mp4').is_file():
+                    os.environ['SOURCE_VIDEO_FILE'] = str(Path('input.mp4').resolve())
+                stamp_start = f"{clip['start_time']:.1f}"
+                stamp_end = f"{clip['end_time']:.1f}"
+                send_telegram_video('output_reel.mp4',
+                                    f"معاينة {clip_id}: {clip['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
+                print(f"CLIP_PREVIEW: ID={clip_id}; START={stamp_start}; END={stamp_end}; DELIVERED=YES")
+            record_preview_result(expected_ref, chosen_ids)
+            send_telegram('اكتملت المعاينة للمقاطع: ' + ', '.join(map(str, chosen_ids)) +
+                          '. لم يُنشر أي فيديو. يمكنك اختيار أرقام أخرى باستخدام /clip.')
+            raise SystemExit(0)
+
         send_telegram(f"⏳ بدأ الوكيل مهمة {AGENT_ACTION} للفيديو:\n{VIDEO_URL}")
-        
+
         fetch_telegram_source()
 
         # 1. Try actual YouTube captions first, then audio transcription from the supplied MP4.
