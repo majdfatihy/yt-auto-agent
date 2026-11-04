@@ -13,6 +13,7 @@ import requests
 from urllib.parse import urlparse, parse_qs
 from google import genai
 from transcription_pipeline import obtain_timed_transcript, cues_to_text, clip_has_coverage, save_captions
+from captions_renderer import burn_captions
 from clip_planner import (build_clip_plan, format_clip_plan, save_clip_plan, source_duration,
                           load_clip_plan, plan_reference, parse_clip_choices, record_preview_result)
 from google.oauth2.credentials import Credentials
@@ -460,19 +461,30 @@ if __name__ == "__main__":
             clips_by_id = {item['id']: item for item in plan['clips']}
             send_telegram('بدأ تجهيز معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)))
             fetch_telegram_source()
+            preview_cues = None  # One local-source transcription for all chosen clips.
             for clip_id in chosen_ids:
                 if plan_reference(load_clip_plan()) != expected_ref:
                     raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
                 clip = clips_by_id[clip_id]
                 download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'])
+                if preview_cues is None:
+                    # Stage 3: trust the audio of the MP4 being cut, never title-only text.
+                    preview_cues, preview_source = obtain_timed_transcript(
+                        VIDEO_URL, video_path='input.mp4', cookies_file=COOKIES_FILE,
+                        prefer_local_audio=True, prefer_word_timestamps=True)
+                    if not preview_cues:
+                        raise RuntimeError('CAPTIONS_UNAVAILABLE: no timed transcription for the selected source; cannot send an uncaptioned preview')
+                    print(f'PREVIEW_TRANSCRIPTION: {preview_source}; CUES: {len(preview_cues)}')
+                captioned_preview = burn_captions(
+                    'output_reel.mp4', preview_cues, clip['start_time'], clip['end_time'])
                 # Reuse input.mp4 in this same runner for any subsequent selection.
                 if Path('input.mp4').is_file():
                     os.environ['SOURCE_VIDEO_FILE'] = str(Path('input.mp4').resolve())
                 stamp_start = f"{clip['start_time']:.1f}"
                 stamp_end = f"{clip['end_time']:.1f}"
-                send_telegram_video('output_reel.mp4',
+                send_telegram_video(captioned_preview,
                                     f"معاينة {clip_id}: {clip['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
-                print(f"CLIP_PREVIEW: ID={clip_id}; START={stamp_start}; END={stamp_end}; DELIVERED=YES")
+                print(f"CLIP_PREVIEW: ID={clip_id}; START={stamp_start}; END={stamp_end}; CAPTIONS_BURNED=YES; DELIVERED=YES")
             record_preview_result(expected_ref, chosen_ids)
             send_telegram('اكتملت المعاينة للمقاطع: ' + ', '.join(map(str, chosen_ids)) +
                           '. لم يُنشر أي فيديو. يمكنك اختيار أرقام أخرى باستخدام /clip.')

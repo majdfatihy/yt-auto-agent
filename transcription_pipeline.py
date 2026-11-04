@@ -88,7 +88,7 @@ def _from_words(words):
     return cues
 
 
-def groq_transcribe(path):
+def groq_transcribe(path, word_timestamps=False):
     key = os.getenv('GROQ_API_KEY', '').strip()
     if not key:
         return []
@@ -96,11 +96,13 @@ def groq_transcribe(path):
         response = requests.post('https://api.groq.com/openai/v1/audio/transcriptions',
             headers={'Authorization': f'Bearer {key}'},
             data={'model': os.getenv('GROQ_TRANSCRIPTION_MODEL', 'whisper-large-v3'),
-                  'response_format': 'verbose_json', 'timestamp_granularities[]': 'segment',
+                  'response_format': 'verbose_json',
+                  'timestamp_granularities[]': 'word' if word_timestamps else 'segment',
                   'language': 'ar'}, files={'file': (Path(path).name, file, 'audio/mpeg')}, timeout=180)
     response.raise_for_status()
-    segments = response.json().get('segments', [])
-    return _from_words(segments)
+    payload = response.json()
+    observations = payload.get('words', []) if word_timestamps else payload.get('segments', [])
+    return _from_words(observations or payload.get('segments', []))
 
 
 def deepgram_transcribe(path):
@@ -181,11 +183,13 @@ def save_captions(cues, stem='verified_transcript'):
     Path(stem + '.vtt').write_text('\n'.join(vtt), encoding='utf-8')
 
 
-def obtain_timed_transcript(url, video_path=None, cookies_file=None):
+def obtain_timed_transcript(url, video_path=None, cookies_file=None,
+                            prefer_local_audio=False, prefer_word_timestamps=False):
     """Return (cues, source). Never invent timestamps. Caption first, then provider fallback."""
-    cues = youtube_captions(url, cookies_file)
-    if cues:
-        return cues, 'youtube_captions'
+    if not prefer_local_audio:
+        cues = youtube_captions(url, cookies_file)
+        if cues:
+            return cues, 'youtube_captions'
     if not video_path or not Path(video_path).is_file():
         return [], 'none'
     audio = audio_from_video(video_path)
@@ -197,7 +201,7 @@ def obtain_timed_transcript(url, video_path=None, cookies_file=None):
         if not fn:
             continue
         try:
-            cues = fn(audio)
+            cues = fn(audio, word_timestamps=prefer_word_timestamps) if name == 'groq' else fn(audio)
             if cues:
                 print(f'TRANSCRIPTION: {name.upper()}; CUES: {len(cues)}')
                 return cues, name
