@@ -23,6 +23,7 @@ TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 YT_COOKIES = os.getenv("YT_COOKIES", "").strip()
+TELEGRAM_FILE_ID = os.getenv("TELEGRAM_FILE_ID", "").strip()
 
 # مفاتيح فيسبوك (اختيارية)
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
@@ -39,6 +40,35 @@ if YT_COOKIES:
     COOKIES_FILE = "cookies.txt"
     with open(COOKIES_FILE, "w", encoding="utf-8") as f:
         f.write(YT_COOKIES.replace("\\n", "\n") + "\n")
+
+
+def fetch_telegram_source():
+    """Fetch a user-supplied MP4 using Telegram Bot API (cloud getFile limit: 20 MB)."""
+    if not TELEGRAM_FILE_ID:
+        return
+    if not TG_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN missing for file download")
+    api = f"https://api.telegram.org/bot{TG_TOKEN}"
+    response = requests.get(f"{api}/getFile", params={"file_id": TELEGRAM_FILE_ID}, timeout=25)
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError("Telegram getFile rejected the file: " + str(payload.get("description", "")))
+    meta = payload["result"]
+    if meta.get("file_size", 0) > 20 * 1024 * 1024:
+        raise RuntimeError("TELEGRAM_FILE_TOO_LARGE: Telegram cloud Bot API download is limited to 20 MB; use a smaller MP4 or a local Bot API server")
+    path = meta["file_path"]
+    url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{path}"
+    with requests.get(url, stream=True, timeout=(20, 120)) as r:
+        r.raise_for_status()
+        with open("telegram_source.mp4", "wb") as out:
+            total = 0
+            for block in r.iter_content(1024 * 1024):
+                total += len(block)
+                if total > 20 * 1024 * 1024:
+                    raise RuntimeError("Telegram MP4 exceeds 20 MB")
+                out.write(block)
+    os.environ["SOURCE_VIDEO_FILE"] = str(Path("telegram_source.mp4").resolve())
 
 
 # ==========================================
@@ -324,12 +354,34 @@ if __name__ == "__main__":
 
         send_telegram(f"⏳ بدأ الوكيل العمل على الفيديو:\n{VIDEO_URL}")
         
+        fetch_telegram_source()
+
         # 1. استخراج المعرف والنص
         vid_id = extract_video_id(VIDEO_URL)
         transcript = get_transcript(vid_id, VIDEO_URL)
         
         # 2. تحليل المحتوى وتوليد السيو عبر Gemini 3.1
+        source_exists = bool(os.getenv("SOURCE_VIDEO_FILE", "").strip())
+        if source_exists:
+            # Audio-aware analysis: upload the original MP4 to Gemini when possible.
+            # If the service rejects the upload, keep metadata generation but never
+            # pretend that title-only metadata contains verified timestamps.
+            try:
+                client = genai.Client(api_key=GEMINI_KEY)
+                uploaded = client.files.upload(file=os.environ["SOURCE_VIDEO_FILE"])
+                prompt = "استخرج ملخصا دقيقا ومقاطع ذات توقيت زمني من هذا الفيديو باللغة العربية. اذكر أزمنة البداية والنهاية بالثواني. لا تخمن معلومات غير موجودة."
+                for model in ("gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"):
+                    try:
+                        response = client.models.generate_content(model=model, contents=[uploaded, prompt])
+                        transcript = (response.text or "")[:20000]
+                        break
+                    except Exception as model_error:
+                        print("Video understanding model unavailable:", type(model_error).__name__)
+            except Exception as source_error:
+                print("Source-video understanding unavailable:", type(source_error).__name__)
         data = analyze_with_gemini(transcript, VIDEO_URL)
+        if not source_exists and transcript.startswith(("عنوان الفيديو الأصلي:", "رابط الفيديو:")):
+            send_telegram("⚠️ تم توليد السيو من العنوان فقط؛ توقيت المقطع مقترح وغير موثوق دون تحليل الفيديو.")
         tags_500 = data['tags_string'][:495]
         chosen_title = data['short_titles'][0]
         description_block = data['description_block']
@@ -364,6 +416,8 @@ if __name__ == "__main__":
             send_telegram(f"🚀 ملخص النشر التلقائي:\n{fb_res}\n{yt_res}")
         except Exception as vid_err:
             send_telegram(f"⚠️ تم إرسال السيو بالكامل أعلاه، لكن حدث عائق أثناء تحميل/قص ملف الـ MP4:\n{str(vid_err)}")
+            if "YOUTUBE_AUTH_REQUIRED" in str(vid_err):
+                send_telegram("📎 أرسل ملف MP4 إلى البوت مع رابط فيديو يوتيوب في التعليق (caption) لاستكمال المعالجة. الحد الحالي للتنزيل عبر Telegram Bot API السحابي هو 20MB.")
             raise
 
     except Exception as e:
