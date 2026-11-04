@@ -1,4 +1,4 @@
-yt-dlp[default]>=2025.11.12
+yt-dlp
 youtube-transcript-api
 google-genai
 requests

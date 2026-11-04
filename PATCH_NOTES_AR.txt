@@ -1,0 +1,6 @@
+إصلاح HTTP 403 في Telegram Inbox:
+1. أنشئ Fine-grained PAT مقيدًا بمستودع yt-auto-agent.
+2. امنحه Variables: Read and write و Contents: Read and write.
+3. خزّنه باسم GH_PAT في GitHub Actions Secrets.
+4. شغّل Telegram Inbox يدويًا.
+التغييرات محصورة في telegram_poll.py و telegram-poll.yml. لم يتم تغيير agent.py أو السيو أو المونتاج.
