@@ -15,6 +15,7 @@ from google import genai
 from transcription_pipeline import obtain_timed_transcript, cues_to_text, clip_has_coverage, save_captions
 from captions_renderer import burn_captions
 from caption_revisions import apply_approved_edits
+from transcript_proofreader import proofread_timed_cues, preserve_approved_word_edits
 from clip_planner import (build_clip_plan, format_clip_plan, save_clip_plan, source_duration,
                           load_clip_plan, plan_reference, parse_clip_choices, record_preview_result)
 from google.oauth2.credentials import Credentials
@@ -476,7 +477,13 @@ if __name__ == "__main__":
                     if not preview_cues:
                         raise RuntimeError('CAPTIONS_UNAVAILABLE: no timed transcription for the selected source; cannot send an uncaptioned preview')
                     print(f'PREVIEW_TRANSCRIPTION: {preview_source}; CUES: {len(preview_cues)}')
-                    preview_cues = apply_approved_edits(preview_cues, VIDEO_URL)
+                    # Validate manual edits against the original ASR words first.
+                    original_cues = preview_cues
+                    approved_cues = apply_approved_edits(original_cues, VIDEO_URL)
+                    # Audio-grounded proofread: Gemini -> Deepgram -> AssemblyAI.
+                    reviewed_cues = proofread_timed_cues(original_cues)
+                    # Manual edits win even if Gemini changed their original words.
+                    preview_cues = preserve_approved_word_edits(original_cues, reviewed_cues, approved_cues)
                 captioned_preview = burn_captions(
                     'output_reel.mp4', preview_cues, clip['start_time'], clip['end_time'])
                 # Reuse input.mp4 in this same runner for any subsequent selection.
