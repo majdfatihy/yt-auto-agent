@@ -11,6 +11,7 @@ from urllib.parse import unquote
 import requests
 from urllib.parse import urlparse, parse_qs
 from google import genai
+from transcription_pipeline import obtain_timed_transcript, cues_to_text, clip_has_coverage, save_captions
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -432,38 +433,24 @@ if __name__ == "__main__":
         
         fetch_telegram_source()
 
-        # 1. استخراج المعرف والنص
+        # 1. Try actual YouTube captions first, then audio transcription from the supplied MP4.
         vid_id = extract_video_id(VIDEO_URL)
-        transcript = get_transcript(vid_id, VIDEO_URL)
-        
-        # 2. تحليل المحتوى وتوليد السيو عبر Gemini 3.1
-        source_exists = bool(os.getenv("SOURCE_VIDEO_FILE", "").strip())
-        video_analysis_ok = False
-        if source_exists:
-            # Audio-aware analysis: upload the original MP4 to Gemini when possible.
-            # If the service rejects the upload, keep metadata generation but never
-            # pretend that title-only metadata contains verified timestamps.
-            try:
-                client = genai.Client(api_key=GEMINI_KEY)
-                uploaded = client.files.upload(file=os.environ["SOURCE_VIDEO_FILE"])
-                prompt = "استخرج ملخصا دقيقا ومقاطع ذات توقيت زمني من هذا الفيديو باللغة العربية. اذكر أزمنة البداية والنهاية بالثواني. لا تخمن معلومات غير موجودة."
-                for model in ("gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"):
-                    try:
-                        response = client.models.generate_content(model=model, contents=[uploaded, prompt])
-                        video_text = (response.text or "").strip()
-                        if not video_text:
-                            raise ValueError("Empty video analysis")
-                        transcript = video_text[:20000]
-                        video_analysis_ok = True
-                        break
-                    except Exception as model_error:
-                        print("Video understanding model unavailable:", type(model_error).__name__)
-            except Exception as source_error:
-                print("Source-video understanding unavailable:", type(source_error).__name__)
+        local_source = os.getenv("SOURCE_VIDEO_FILE", "").strip()
+        timed_cues, timed_source = obtain_timed_transcript(
+            VIDEO_URL, video_path=local_source or None, cookies_file=COOKIES_FILE)
+        timing_grounded = bool(timed_cues)
+        if timing_grounded:
+            save_captions(timed_cues)
+            transcript = cues_to_text(timed_cues)
+            print(f"TIMED_TRANSCRIPT: {timed_source}; CUES: {len(timed_cues)}")
+        else:
+            transcript = get_transcript(vid_id, VIDEO_URL)
+            print("TIMED_TRANSCRIPT: UNAVAILABLE; TITLE_ONLY_FALLBACK: YES")
+
+        # 2. Generate metadata. Gemini never invents authoritative timestamps.
         data = analyze_with_gemini(transcript, VIDEO_URL)
-        timing_grounded = (TRANSCRIPT_SOURCE == "subtitles" or video_analysis_ok)
         if not timing_grounded:
-            send_telegram("⚠️ تم توليد السيو من العنوان فقط؛ توقيت المقطع مقترح وغير موثوق دون تحليل الفيديو.")
+            send_telegram("⚠️ لا توجد ترجمة مؤقتة موثوقة؛ السيو مؤقت ولا يسمح بالقص.")
         tags_500 = data['tags_string']
         chosen_title = data['short_titles'][0]
         description_block = data['description_block']
@@ -494,6 +481,11 @@ if __name__ == "__main__":
         # Never clip or publish a timestamp derived solely from metadata/title.
         if not timing_grounded:
             send_telegram("⛔ لم يتم القص أو النشر: توقيت المقطع غير موثوق لأن النص المتاح لا يحتوي على تحليل فعلي للفيديو أو ترجمة مستخرجة. أرسل MP4 مع الرابط أو وفّر ترجمة قابلة للاستخراج.")
+            raise SystemExit(0)
+
+        # Confirm that proposed interval actually overlaps timestamped speech.
+        if not clip_has_coverage(timed_cues, data['start_time'], data['end_time']):
+            send_telegram("⛔ توقيت Gemini لا يتطابق مع مقاطع الكلام المؤقتة؛ تم منع القص والنشر.")
             raise SystemExit(0)
 
         # 4. Generate a preview; only explicit /publish can upload.
