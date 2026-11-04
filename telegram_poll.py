@@ -5,7 +5,9 @@ import requests
 
 TOKEN = os.environ['TELEGRAM_TOKEN']
 CHAT = str(os.environ['TELEGRAM_CHAT_ID'])
-GH_TOKEN = os.environ['GITHUB_TOKEN']
+GH_TOKEN = os.environ.get('GITHUB_TOKEN', '').strip()
+if not GH_TOKEN:
+    raise RuntimeError('GH_PAT secret is missing. Configure a fine-grained token with Variables: Read and write, Contents: Read and write.')
 REPO = os.environ['GITHUB_REPOSITORY']
 API = f'https://api.github.com/repos/{REPO}'
 HEADERS = {'Authorization': f'Bearer {GH_TOKEN}', 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
@@ -25,6 +27,8 @@ def main():
         offset = 0
         create = True
     else:
+        if v.status_code == 403:
+            raise RuntimeError('GitHub HTTP 403 reading Actions variable. Check GH_PAT repository access and Variables: Read and write permission.')
         v.raise_for_status()
         offset = int(v.json()['value'])
         create = False
@@ -62,6 +66,8 @@ def main():
     data = {'name': 'TELEGRAM_UPDATE_OFFSET', 'value': str(offset)} if create else {'value': str(offset)}
     method = requests.post if create else requests.patch
     r = method(f'{API}/actions/variables' + ('' if create else '/TELEGRAM_UPDATE_OFFSET'), headers=HEADERS, json=data, timeout=20)
+    if r.status_code == 403:
+        raise RuntimeError('GitHub HTTP 403 saving Actions variable. Check GH_PAT Variables: Read and write permission.')
     r.raise_for_status()
     print('Telegram polling complete; next offset:', offset)
 
