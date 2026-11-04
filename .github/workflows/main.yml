@@ -29,12 +29,16 @@ jobs:
       - name: تثبيت أداة المونتاج والمكتبات
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-noto-core fontconfig
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m yt_dlp --version
           deno --version
           ffmpeg -version | head -n 1
+
+      - name: تثبيت خط Mikhak Black للمعاينة فقط
+        if: ${{ github.event.client_payload.agent_action == 'preview' }}
+        run: python scripts/install_mikhak.py
 
       - name: تشغيل الوكيل الذكي
         env:
