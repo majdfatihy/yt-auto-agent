@@ -25,6 +25,7 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 YT_COOKIES = os.getenv("YT_COOKIES", "").strip()
 TELEGRAM_FILE_ID = os.getenv("TELEGRAM_FILE_ID", "").strip()
 AGENT_ACTION = os.getenv("AGENT_ACTION", "prepare").strip().lower()
+TRANSCRIPT_SOURCE = "unknown"
 
 # مفاتيح فيسبوك (اختيارية)
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
@@ -130,6 +131,8 @@ def extract_video_id(url):
 
 def get_transcript(video_id, url):
     """محرك ثلاثي المراحل لسحب النص والترجمة وتخطي حظر IP السحابة"""
+    global TRANSCRIPT_SOURCE
+    TRANSCRIPT_SOURCE = "unknown"
     
     # المرحلة 1: استخدام yt-dlp (مع الكوكيز إن وجدت) لسحب ملف الترجمة
     try:
@@ -158,6 +161,7 @@ def get_transcript(video_id, url):
                     if not lines or lines[-1] != line.strip():
                         lines.append(line.strip())
             if lines:
+                TRANSCRIPT_SOURCE = "subtitles"
                 print("✅ تم سحب الكابشن بنجاح عبر المرحلة الأولى (yt-dlp)")
                 return "\n".join(lines)[:20000]
     except Exception as e:
@@ -176,6 +180,7 @@ def get_transcript(video_id, url):
                 vdata = r.json()
                 title = vdata.get("title", "")
                 desc = vdata.get("description", "")
+                TRANSCRIPT_SOURCE = "description"
                 print(f"✅ تم سحب بيانات الفيديو الكاملة عبر المرحلة الثانية ({instance})")
                 return f"عنوان الفيديو: {title}\nتفاصيل ومحتوى الفيديو:\n{desc}"[:20000]
         except Exception:
@@ -184,10 +189,64 @@ def get_transcript(video_id, url):
     # المرحلة 3: خطة الطوارئ عبر NoEmbed
     try:
         r = requests.get(f"https://noembed.com/embed?url=https://www.youtube.com/watch?v={video_id}", timeout=10).json()
+        TRANSCRIPT_SOURCE = "title"
         print("✅ تم سحب العنوان عبر المرحلة الثالثة (NoEmbed)")
         return f"عنوان الفيديو الأصلي: {r.get('title', '')} - القناة: {r.get('author_name', '')}"
     except Exception:
+        TRANSCRIPT_SOURCE = "url"
         return f"رابط الفيديو: {url}"
+
+
+def parse_gemini_json(raw):
+    """Parse one JSON object, tolerating Markdown fences or surrounding commentary.
+
+    Multiple objects are rejected instead of silently selecting potentially wrong data.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("GEMINI_EMPTY_RESPONSE: Gemini returned no text")
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.I)
+        text = re.sub(r"\s*```$", "", text, count=1).strip()
+    decoder = json.JSONDecoder()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        objects = []
+        for match in re.finditer(r"\{", text):
+            try:
+                obj, consumed = decoder.raw_decode(text[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                objects.append((obj, match.start(), match.start() + consumed))
+        # Reject any ambiguous second object; don't silently accept extra JSON.
+        if len(objects) != 1:
+            raise ValueError("GEMINI_INVALID_JSON: expected exactly one JSON object")
+        parsed = objects[0][0]
+    if not isinstance(parsed, dict):
+        raise ValueError("GEMINI_INVALID_JSON: response must be a JSON object")
+    return parsed
+
+
+def validate_gemini_data(data):
+    """Validate fields used by SEO and video clipping before any side effects."""
+    for key in ("long_titles", "short_titles"):
+        value = data.get(key)
+        if not isinstance(value, list) or len(value) != 3 or any(not isinstance(x, str) or not x.strip() for x in value):
+            raise ValueError(f"GEMINI_INVALID_FIELD: {key} must contain exactly 3 nonempty titles")
+    for key in ("description_block", "tags_string", "quora_ar", "quora_en"):
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            raise ValueError(f"GEMINI_INVALID_FIELD: {key} must be nonempty text")
+    for key in ("start_time", "end_time"):
+        if type(data.get(key)) is not int:
+            raise ValueError(f"GEMINI_INVALID_FIELD: {key} must be an integer")
+    start, end = data["start_time"], data["end_time"]
+    if start < 0 or end - start < 30 or end - start > 55:
+        raise ValueError("GEMINI_INVALID_INTERVAL: clip must be between 30 and 55 seconds")
+    if len(data["tags_string"]) > 500:
+        raise ValueError("GEMINI_INVALID_TAGS: tags_string exceeds 500 characters")
+    return data
 
 
 # ==========================================
@@ -230,10 +289,11 @@ def analyze_with_gemini(transcript_text, video_url):
                 contents=prompt,
                 config={'response_mime_type': 'application/json'}
             )
-            print(f"✅ نجح التوليد باستخدام نموذج: {model_name}")
-            return json.loads(response.text)
+            parsed = validate_gemini_data(parse_gemini_json(response.text))
+            print(f"✅ نجح توليد JSON صالح باستخدام نموذج: {model_name}")
+            return parsed
         except Exception as e:
-            print(f"⚠️ النموذج {model_name} غير متاح، جاري تجربة البديل... ({e})")
+            print(f"⚠️ فشلت محاولة النموذج {model_name} ({type(e).__name__}: {str(e)[:180]})، جاري تجربة البديل...")
             last_err = e
             
     raise last_err
@@ -248,7 +308,11 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
     target = Path("input.mp4")
     if source.is_file():
         shutil.copyfile(source, target)
+        print("SOURCE: LOCAL_MP4; YOUTUBE_DOWNLOAD: SKIPPED")
     else:
+        if os.getenv("TELEGRAM_FILE_ID", "").strip():
+            raise RuntimeError("TELEGRAM_MP4_UNAVAILABLE: a Telegram file ID was supplied but no validated local MP4 is available; refusing YouTube fallback")
+        print("SOURCE: YOUTUBE_DOWNLOAD; TELEGRAM_FILE_ID: ABSENT")
         cmd = ["yt-dlp", "--no-playlist", "--no-progress", "--newline",
                "--retries", "3", "--fragment-retries", "3", "--socket-timeout", "25",
                "--merge-output-format", "mp4", "-f",
@@ -374,6 +438,7 @@ if __name__ == "__main__":
         
         # 2. تحليل المحتوى وتوليد السيو عبر Gemini 3.1
         source_exists = bool(os.getenv("SOURCE_VIDEO_FILE", "").strip())
+        video_analysis_ok = False
         if source_exists:
             # Audio-aware analysis: upload the original MP4 to Gemini when possible.
             # If the service rejects the upload, keep metadata generation but never
@@ -385,16 +450,21 @@ if __name__ == "__main__":
                 for model in ("gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"):
                     try:
                         response = client.models.generate_content(model=model, contents=[uploaded, prompt])
-                        transcript = (response.text or "")[:20000]
+                        video_text = (response.text or "").strip()
+                        if not video_text:
+                            raise ValueError("Empty video analysis")
+                        transcript = video_text[:20000]
+                        video_analysis_ok = True
                         break
                     except Exception as model_error:
                         print("Video understanding model unavailable:", type(model_error).__name__)
             except Exception as source_error:
                 print("Source-video understanding unavailable:", type(source_error).__name__)
         data = analyze_with_gemini(transcript, VIDEO_URL)
-        if not source_exists and transcript.startswith(("عنوان الفيديو الأصلي:", "رابط الفيديو:")):
+        timing_grounded = (TRANSCRIPT_SOURCE == "subtitles" or video_analysis_ok)
+        if not timing_grounded:
             send_telegram("⚠️ تم توليد السيو من العنوان فقط؛ توقيت المقطع مقترح وغير موثوق دون تحليل الفيديو.")
-        tags_500 = data['tags_string'][:495]
+        tags_500 = data['tags_string']
         chosen_title = data['short_titles'][0]
         description_block = data['description_block']
         
@@ -421,6 +491,11 @@ if __name__ == "__main__":
             send_telegram('اكتمل إعداد البيانات الوصفية فقط. لم يتم قص أو نشر فيديو.')
             raise SystemExit(0)
 
+        # Never clip or publish a timestamp derived solely from metadata/title.
+        if not timing_grounded:
+            send_telegram("⛔ لم يتم القص أو النشر: توقيت المقطع غير موثوق لأن النص المتاح لا يحتوي على تحليل فعلي للفيديو أو ترجمة مستخرجة. أرسل MP4 مع الرابط أو وفّر ترجمة قابلة للاستخراج.")
+            raise SystemExit(0)
+
         # 4. Generate a preview; only explicit /publish can upload.
         try:
             send_telegram(f"🎬 جاري تحميل الفيديو وقص اللقطة من الثانية ({data['start_time']}) إلى ({data['end_time']})...")
@@ -433,12 +508,12 @@ if __name__ == "__main__":
             else:
                 send_telegram('اكتملت المعاينة فقط؛ لم يتم النشر. لإصدار أمر نشر صريح أرسل /publish. سيُعاد تجهيز المصدر عند النشر.')
         except Exception as vid_err:
-            send_telegram(f"⚠️ تم إرسال السيو بالكامل أعلاه، لكن حدث عائق أثناء تحميل/قص ملف الـ MP4:\n{str(vid_err)}")
+            send_telegram(f"⚠️ تعذر تجهيز الفيديو: {type(vid_err).__name__}: {str(vid_err)[:350]}")
             if "YOUTUBE_AUTH_REQUIRED" in str(vid_err):
                 send_telegram("📎 أرسل ملف MP4 إلى البوت مع رابط فيديو يوتيوب في التعليق (caption) لاستكمال المعالجة. الحد الحالي للتنزيل عبر Telegram Bot API السحابي هو 20MB.")
             raise
 
     except Exception as e:
-        err_trace = traceback.format_exc()
-        send_telegram(f"❌ حدث خطأ برمجي:\n{str(e)}\n\nالتفاصيل:\n{err_trace[-800:]}")
+        traceback.print_exc()
+        send_telegram(f"❌ تعذر إكمال المهمة ({type(e).__name__}): {str(e)[:300]}. راجع سجل GitHub Actions للتفاصيل.")
         exit(1)
