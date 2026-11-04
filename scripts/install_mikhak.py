@@ -30,7 +30,7 @@ def validate_font(path):
         family = font['name'].getDebugName(1) or ''
         style = font['name'].getDebugName(2) or ''
         weight = font['OS/2'].usWeightClass
-        if 'Mikhak' not in family or 'Black' not in style or weight < 850:
+        if 'Mikhak' not in family or 'Black' not in (family + ' ' + style) or weight < 850:
             raise RuntimeError(f'WRONG_FONT: {family}/{style}/{weight}')
         available = font.getBestCmap() or {}
         missing = sorted({ch for ch in REQUIRED if ord(ch) not in available})

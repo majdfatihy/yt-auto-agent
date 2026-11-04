@@ -214,7 +214,7 @@ def _verify_font(font_path, events):
         family = font['name'].getDebugName(1) or ''
         style = font['name'].getDebugName(2) or ''
         weight = font['OS/2'].usWeightClass
-        if 'Mikhak' not in family or weight < 850 or 'Black' not in style:
+        if 'Mikhak' not in family or weight < 850 or 'Black' not in (family + ' ' + style):
             raise RuntimeError(f'MIKHAK_BLACK_IDENTITY_INVALID: {family}/{style}/{weight}')
         glyphs = font.getBestCmap() or {}
         content = ''.join(c['text'] for c in events)
