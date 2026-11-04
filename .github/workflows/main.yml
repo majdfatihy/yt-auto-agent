@@ -39,6 +39,7 @@ jobs:
       - name: تشغيل الوكيل الذكي
         env:
           VIDEO_URL: ${{ github.event.client_payload.video_url || github.event.inputs.video_url }}
+          AGENT_ACTION: ${{ github.event.client_payload.agent_action || 'prepare' }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

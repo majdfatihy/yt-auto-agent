@@ -24,6 +24,7 @@ TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 YT_COOKIES = os.getenv("YT_COOKIES", "").strip()
 TELEGRAM_FILE_ID = os.getenv("TELEGRAM_FILE_ID", "").strip()
+AGENT_ACTION = os.getenv("AGENT_ACTION", "prepare").strip().lower()
 
 # مفاتيح فيسبوك (اختيارية)
 FB_PAGE_ID = os.getenv("FB_PAGE_ID", "").strip()
@@ -361,7 +362,9 @@ if __name__ == "__main__":
         if not VIDEO_URL:
             raise ValueError("لم يتم إدخال رابط الفيديو (VIDEO_URL فارغ)!")
 
-        send_telegram(f"⏳ بدأ الوكيل العمل على الفيديو:\n{VIDEO_URL}")
+        if AGENT_ACTION not in ('seo', 'prepare', 'publish'):
+            raise ValueError('Unsupported AGENT_ACTION; refusing to publish')
+        send_telegram(f"⏳ بدأ الوكيل مهمة {AGENT_ACTION} للفيديو:\n{VIDEO_URL}")
         
         fetch_telegram_source()
 
@@ -411,18 +414,24 @@ if __name__ == "__main__":
             f"{tags_500}"
         )
         send_telegram(seo_msg)
-        send_telegram(f"🇪🇬 منشور Quora (عربي):\n\n{data['quora_ar']}")
-        send_telegram(f"🇺🇸 منشور Quora (إنجليزي):\n\n{data['quora_en']}")
+        # Quora drafts are not sent unless a separate future command requests them.
         
-        # 4. تحميل وقص الفيديو والنشر التلقائي
+        # SEO-only must never fetch, trim, or publish video.
+        if AGENT_ACTION == 'seo':
+            send_telegram('اكتمل إعداد البيانات الوصفية فقط. لم يتم قص أو نشر فيديو.')
+            raise SystemExit(0)
+
+        # 4. Generate a preview; only explicit /publish can upload.
         try:
             send_telegram(f"🎬 جاري تحميل الفيديو وقص اللقطة من الثانية ({data['start_time']}) إلى ({data['end_time']})...")
             download_and_convert_to_reel(VIDEO_URL, data['start_time'], data['end_time'])
             send_telegram_video("output_reel.mp4", caption=f"{chosen_title}\n\n{description_block}")
             
-            fb_res = upload_to_facebook("output_reel.mp4", chosen_title, description_block)
-            yt_res = upload_to_youtube("output_reel.mp4", chosen_title, description_block, tags_500)
-            send_telegram(f"🚀 ملخص النشر التلقائي:\n{fb_res}\n{yt_res}")
+            if AGENT_ACTION == 'publish':
+                yt_res = upload_to_youtube("output_reel.mp4", chosen_title, description_block, tags_500)
+                send_telegram(f"نتيجة النشر المطلوب صراحةً على يوتيوب:\n{yt_res}")
+            else:
+                send_telegram('اكتملت المعاينة فقط؛ لم يتم النشر. لإصدار أمر نشر صريح أرسل /publish. سيُعاد تجهيز المصدر عند النشر.')
         except Exception as vid_err:
             send_telegram(f"⚠️ تم إرسال السيو بالكامل أعلاه، لكن حدث عائق أثناء تحميل/قص ملف الـ MP4:\n{str(vid_err)}")
             if "YOUTUBE_AUTH_REQUIRED" in str(vid_err):
