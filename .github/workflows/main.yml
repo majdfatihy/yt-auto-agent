@@ -49,5 +49,6 @@ jobs:
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
           SOURCE_VIDEO_FILE: ${{ github.event.client_payload.source_video_file || '' }}
+          TELEGRAM_FILE_ID: ${{ github.event.client_payload.telegram_file_id || '' }}
           YT_PRIVACY_STATUS: private
         run: python agent.py
