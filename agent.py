@@ -12,6 +12,7 @@ import requests
 from urllib.parse import urlparse, parse_qs
 from google import genai
 from transcription_pipeline import obtain_timed_transcript, cues_to_text, clip_has_coverage, save_captions
+from clip_planner import build_clip_plan, format_clip_plan, save_clip_plan, source_duration
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -94,10 +95,10 @@ def send_telegram(msg):
         return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     for i in range(0, len(msg), 4000):
-        try:
-            requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg[i:i+4000]}, timeout=15)
-        except Exception as e:
-            print(f"Telegram error: {e}")
+        response = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg[i:i+4000]}, timeout=15)
+        response.raise_for_status()
+        if not response.json().get("ok"):
+            raise RuntimeError("Telegram refused sendMessage")
 
 
 def send_telegram_video(video_path, caption=""):
@@ -447,7 +448,18 @@ if __name__ == "__main__":
             transcript = get_transcript(vid_id, VIDEO_URL)
             print("TIMED_TRANSCRIPT: UNAVAILABLE; TITLE_ONLY_FALLBACK: YES")
 
-        # 2. Generate metadata. Gemini never invents authoritative timestamps.
+        # Stage 1: /prepare lists options ONLY. Never create MP4 or generate SEO here.
+        if AGENT_ACTION == 'prepare':
+            if not timing_grounded:
+                send_telegram('⛔ لا يمكن اقتراح قص موثوق بدون تفريغ مؤقت للكلام. أرسل MP4 مع رابطه.')
+                raise SystemExit(0)
+            duration = source_duration(local_source or None, timed_cues)
+            plan = build_clip_plan(VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, GEMINI_KEY)
+            save_clip_plan(plan)
+            send_telegram(format_clip_plan(plan))
+            raise SystemExit(0)
+
+        # /seo is the only command that requests descriptive metadata.
         data = analyze_with_gemini(transcript, VIDEO_URL)
         if not timing_grounded:
             send_telegram("⚠️ لا توجد ترجمة مؤقتة موثوقة؛ السيو مؤقت ولا يسمح بالقص.")
@@ -478,32 +490,6 @@ if __name__ == "__main__":
             send_telegram('اكتمل إعداد البيانات الوصفية فقط. لم يتم قص أو نشر فيديو.')
             raise SystemExit(0)
 
-        # Never clip or publish a timestamp derived solely from metadata/title.
-        if not timing_grounded:
-            send_telegram("⛔ لم يتم القص أو النشر: توقيت المقطع غير موثوق لأن النص المتاح لا يحتوي على تحليل فعلي للفيديو أو ترجمة مستخرجة. أرسل MP4 مع الرابط أو وفّر ترجمة قابلة للاستخراج.")
-            raise SystemExit(0)
-
-        # Confirm that proposed interval actually overlaps timestamped speech.
-        if not clip_has_coverage(timed_cues, data['start_time'], data['end_time']):
-            send_telegram("⛔ توقيت Gemini لا يتطابق مع مقاطع الكلام المؤقتة؛ تم منع القص والنشر.")
-            raise SystemExit(0)
-
-        # 4. Generate a preview; only explicit /publish can upload.
-        try:
-            send_telegram(f"🎬 جاري تحميل الفيديو وقص اللقطة من الثانية ({data['start_time']}) إلى ({data['end_time']})...")
-            download_and_convert_to_reel(VIDEO_URL, data['start_time'], data['end_time'])
-            send_telegram_video("output_reel.mp4", caption=f"{chosen_title}\n\n{description_block}")
-            
-            if AGENT_ACTION == 'publish':
-                yt_res = upload_to_youtube("output_reel.mp4", chosen_title, description_block, tags_500)
-                send_telegram(f"نتيجة النشر المطلوب صراحةً على يوتيوب:\n{yt_res}")
-            else:
-                send_telegram('اكتملت المعاينة فقط؛ لم يتم النشر. لإصدار أمر نشر صريح أرسل /publish. سيُعاد تجهيز المصدر عند النشر.')
-        except Exception as vid_err:
-            send_telegram(f"⚠️ تعذر تجهيز الفيديو: {type(vid_err).__name__}: {str(vid_err)[:350]}")
-            if "YOUTUBE_AUTH_REQUIRED" in str(vid_err):
-                send_telegram("📎 أرسل ملف MP4 إلى البوت مع رابط فيديو يوتيوب في التعليق (caption) لاستكمال المعالجة. الحد الحالي للتنزيل عبر Telegram Bot API السحابي هو 20MB.")
-            raise
 
     except Exception as e:
         traceback.print_exc()

@@ -1,0 +1,24 @@
+# Local credentials and authentication cookies (new, untracked files only)
+.env
+.env.*
+!.env.example
+cookies.txt
+*.cookies.txt
+
+# Generated media and captions
+telegram_source.mp4
+transcription_audio.mp3
+input.mp4
+input.mkv
+input.webm
+output_reel.mp4
+verified_transcript.srt
+verified_transcript.vtt
+sub_file*.vtt
+captions_cache/
+
+# Local Python state and archives
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.zip

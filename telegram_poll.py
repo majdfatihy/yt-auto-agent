@@ -55,15 +55,15 @@ def get_mp4(msg):
 
 def send_menu():
     telegram('sendMessage', chat_id=CHAT, text=(
-        'لوحة تحكم الوكيل V5\n'
+        'لوحة تحكم الوكيل — المرحلة الأولى\n'
         '1) أرسل رابط يوتيوب أو MP4 مع رابطه لحفظ المصدر فقط.\n'
-        '2) /prepare — تجهيز معاينة ريلز من آخر مصدر، بدون نشر.\n'
+        '2) /prepare — اقتراح مقاطع بعناوين وتوقيتات فقط، بدون قص.\n'
         '3) /seo — توليد بيانات وصفية فقط من آخر مصدر.\n'
-        '4) /publish — نشر آخر مصدر على يوتيوب بعد أمر صريح منك.\n'
+        '4) /publish — متوقف حتى إتاحة اختيار المقطع والمعاينة والموافقة.\n'
         '5) /status — عرض المصدر المحفوظ.\n'
         '6) /cancel — إلغاء المصدر المحفوظ.\n'
         'يمكنك أيضًا إرسال /prepare أو /seo أو /publish متبوعًا برابط يوتيوب.\n'
-        'مهم: /publish أمر نشر مباشر، ولا يُنفّذ بمجرد إرسال الفيديو.'))
+        'مهم: المرحلة الحالية اقتراح فقط، ولا يوجد قص أو نشر.'))
 
 
 def read_source():
@@ -77,6 +77,13 @@ def read_source():
 
 def save_source(data, exists):
     set_variable('TELEGRAM_LAST_SOURCE', json.dumps(data, ensure_ascii=False), exists)
+
+
+def clear_clip_plan():
+    """Invalidate any saved suggestions when the source is cancelled or replaced."""
+    _, exists = get_variable('TELEGRAM_CLIP_PROPOSALS', '{}')
+    if exists:
+        set_variable('TELEGRAM_CLIP_PROPOSALS', '{}', True)
 
 
 def dispatch(link, media, action, request_message_id):
@@ -130,11 +137,14 @@ def main():
             send_menu()
         elif command == '/cancel':
             save_source({}, source_exists)
-            telegram('sendMessage', chat_id=CHAT, text='تم إلغاء المصدر المحفوظ. لم يُنشر شيء.')
+            clear_clip_plan()
+            telegram('sendMessage', chat_id=CHAT, text='تم إلغاء المصدر والاقتراحات المحفوظة. لم يُنشر شيء.')
         elif command == '/status':
             telegram('sendMessage', chat_id=CHAT, text='آخر مصدر محفوظ: ' + (source.get('video_url') or 'لا يوجد'))
-        elif command in ('/prepare', '/seo', '/publish'):
-            action = {'/prepare':'prepare', '/seo':'seo', '/publish':'publish'}[command]
+        elif command == '/publish':
+            telegram('sendMessage', chat_id=CHAT, text='⛔ النشر متوقف مؤقتًا. لازم تختار المقطع وتراجع المعاينة وتوافق قبل النشر.')
+        elif command in ('/prepare', '/seo'):
+            action = {'/prepare':'prepare', '/seo':'seo'}[command]
             selected = {'video_url':link, 'telegram_file_id':media.get('file_id') if media else ''} if link else source
             if not selected.get('video_url'):
                 telegram('sendMessage', chat_id=CHAT, text='أرسل رابط فيديو أو MP4 مع رابطه أولًا، ثم أرسل الأمر المطلوب.')
@@ -142,15 +152,16 @@ def main():
                 payload_media = {'file_id': selected['telegram_file_id']} if selected.get('telegram_file_id') else None
                 if dispatch(selected['video_url'], payload_media, action, request_message_id):
                     telegram('sendMessage', chat_id=CHAT, text={
-                        'prepare':'تم طلب تجهيز المعاينة فقط. لا يوجد نشر تلقائي.',
+                        'prepare':'تم طلب تحليل الفيديو واقتراح توقيتات فقط، بدون قص أو نشر.',
                         'seo':'تم طلب البيانات الوصفية فقط. لا يوجد نشر.',
-                        'publish':'تم استلام أمر النشر الصريح على يوتيوب. جارٍ التنفيذ.'}[action])
+                        'publish':'النشر متوقف حتى المرحلة النهائية.'}[action])
         elif link:
             if media and media.get('file_size', 0) > MAX_FILE:
                 telegram('sendMessage', chat_id=CHAT, text='ملف MP4 أكبر من 20MB؛ استخدم ملفًا أصغر أو مصدرًا بديلًا.')
             else:
                 save_source({'video_url':link, 'telegram_file_id':media.get('file_id', '') if media else ''}, source_exists)
-                telegram('sendMessage', chat_id=CHAT, text='تم حفظ مصدر الفيديو فقط، ولم تبدأ المعالجة أو النشر. أرسل /prepare أو /seo أو /publish.')
+                clear_clip_plan()
+                telegram('sendMessage', chat_id=CHAT, text='تم حفظ المصدر فقط. أرسل /prepare لاقتراح توقيتات أو /seo للبيانات الوصفية.')
         elif media:
             telegram('sendMessage', chat_id=CHAT, text='وصل MP4 بدون رابط. أضف رابط يوتيوب في تعليق الملف أو رد عليه بالرابط؛ لن يبدأ أي نشر تلقائي.')
         elif text:
