@@ -6,6 +6,9 @@ on:
 permissions:
   contents: read
   actions: write
+concurrency:
+  group: telegram-inbox-poll
+  cancel-in-progress: false
 jobs:
   poll:
     runs-on: ubuntu-24.04

@@ -68,7 +68,16 @@ def fetch_telegram_source():
                 if total > 20 * 1024 * 1024:
                     raise RuntimeError("Telegram MP4 exceeds 20 MB")
                 out.write(block)
-    os.environ["SOURCE_VIDEO_FILE"] = str(Path("telegram_source.mp4").resolve())
+    source = Path("telegram_source.mp4")
+    if source.stat().st_size == 0:
+        raise RuntimeError("TELEGRAM_MP4_EMPTY: downloaded file is empty")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                            "-of", "default=noprint_wrappers=1:nokey=1", str(source)],
+                           capture_output=True, text=True, timeout=30)
+    if probe.returncode != 0 or not probe.stdout.strip():
+        raise RuntimeError("TELEGRAM_MP4_INVALID: ffprobe could not read the downloaded MP4")
+    os.environ["SOURCE_VIDEO_FILE"] = str(source.resolve())
+    print("SOURCE: TELEGRAM_MP4; FILE_RECEIVED: YES; FILE_VALIDATED: YES; YOUTUBE_DOWNLOAD: SKIPPED")
 
 
 # ==========================================
