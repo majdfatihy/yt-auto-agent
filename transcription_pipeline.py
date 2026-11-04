@@ -1,3 +1,4 @@
+
 """Timestamp-grounded transcript acquisition. No publishing side effects."""
 import json
 import os
@@ -97,8 +98,8 @@ def groq_transcribe(path, word_timestamps=False):
             headers={'Authorization': f'Bearer {key}'},
             data={'model': os.getenv('GROQ_TRANSCRIPTION_MODEL', 'whisper-large-v3'),
                   'response_format': 'verbose_json',
-                  'timestamp_granularities[]': 'word' if word_timestamps else 'segment',
-                  'language': 'ar'}, files={'file': (Path(path).name, file, 'audio/mpeg')}, timeout=180)
+                  'timestamp_granularities[]': 'word' if word_timestamps else 'segment'},
+            files={'file': (Path(path).name, file, 'audio/mpeg')}, timeout=180)
     response.raise_for_status()
     payload = response.json()
     observations = payload.get('words', []) if word_timestamps else payload.get('segments', [])
@@ -111,8 +112,9 @@ def deepgram_transcribe(path):
         return []
     with open(path, 'rb') as file:
         response = requests.post('https://api.deepgram.com/v1/listen',
-            params={'model': os.getenv('DEEPGRAM_MODEL', 'nova-3'), 'language': 'ar-EG',
-                    'punctuate': 'true', 'smart_format': 'true'},
+            params=[('model', os.getenv('DEEPGRAM_MODEL', 'nova-3')),
+                    ('language', 'multi'), ('language_hint', 'ar'), ('language_hint', 'en'),
+                    ('punctuate', 'true'), ('smart_format', 'true')],
             headers={'Authorization': f'Token {key}', 'Content-Type': 'audio/mpeg'},
             data=file, timeout=180)
     response.raise_for_status()
@@ -130,7 +132,7 @@ def assemblyai_transcribe(path):
     upload.raise_for_status()
     job = requests.post('https://api.assemblyai.com/v2/transcript', headers=headers,
         json={'audio_url': upload.json()['upload_url'], 'speech_models': ['universal-3-pro', 'universal-2'],
-              'language_code': 'ar'}, timeout=30)
+              'language_detection': True, 'language_detection_options': {'code_switching': True}}, timeout=30)
     job.raise_for_status()
     job_id = job.json()['id']
     import time
