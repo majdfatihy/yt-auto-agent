@@ -1,3 +1,4 @@
+
 """Audio-grounded, conservative proofreading for timed preview subtitles.
 
 Priority: Gemini listening to source audio -> Deepgram ASR -> AssemblyAI ASR.
@@ -127,9 +128,12 @@ def _fallback_cues_valid(original, candidate):
         return False
     if not (max(3, int(len(original) * .55)) <= len(candidate) <= int(len(original) * 1.6) + 1):
         return False
-    start_delta = abs(float(candidate[0]['start']) - float(original[0]['start']))
-    end_delta = abs(float(candidate[-1]['end']) - float(original[-1]['end']))
-    return start_delta <= 5 and end_delta <= 6
+    try:
+        start_delta = abs(float(candidate[0]['start']) - float(original[0]['start']))
+        end_delta = abs(float(candidate[-1]['end']) - float(original[-1]['end']))
+    except (TypeError, ValueError, KeyError, IndexError):
+        return False
+    return math.isfinite(start_delta) and math.isfinite(end_delta) and start_delta <= 5 and end_delta <= 6
 
 
 def proofread_timed_cues(cues, audio_path='transcription_audio.mp3'):
@@ -138,26 +142,37 @@ def proofread_timed_cues(cues, audio_path='transcription_audio.mp3'):
     Original is retained if every provider is absent, errors or yields invalid data.
     Intended ONLY for preview caption text, not for publishing.
     """
-    if not _word_cues_valid(cues):
-        print('CAPTION_PROOFREAD: INVALID_WORD_TIMINGS; ORIGINAL_RETAINED')
-        return cues
+    valid_source = _word_cues_valid(cues)
+    if not valid_source:
+        print('CAPTION_PROOFREAD: INVALID_WORD_TIMINGS; REQUESTING_WORD_LEVEL_ASR')
     audio = Path(audio_path)
     if not audio.is_file() or not audio.stat().st_size:
         print('CAPTION_PROOFREAD: AUDIO_MISSING; ORIGINAL_RETAINED')
         return cues
-    try:
-        reviewed = _gemini_review(cues, audio)
-        if reviewed is not None:
-            return reviewed
-    except Exception as exc:
-        print(f'CAPTION_PROOFREAD: GEMINI_UNAVAILABLE; ERROR: {type(exc).__name__}; '
-              'TRY_NEXT_PROVIDER')
+    if valid_source:
+        try:
+            reviewed = _gemini_review(cues, audio)
+            if reviewed is not None:
+                return reviewed
+        except Exception as exc:
+            print(f'CAPTION_PROOFREAD: GEMINI_UNAVAILABLE; ERROR: {type(exc).__name__}; '
+                  'TRY_NEXT_PROVIDER')
 
-    # Independent audio recognition, not claimed to be an LLM proofreading pass.
+    # Invalid source cues are not sent to Gemini as word-level tokens.
+    # First obtain independently timed word cues, then proofread those cues.
     for provider, fn in [('DEEPGRAM', deepgram_transcribe), ('ASSEMBLYAI', assemblyai_transcribe)]:
         try:
             alternate = fn(str(audio))
             if _fallback_cues_valid(cues, alternate):
+                if not valid_source:
+                    print(f'CAPTION_PROOFREAD: RECOVERED_WORD_TIMINGS; PROVIDER: {provider}; '
+                          f'CUES: {len(alternate)}')
+                    try:
+                        reviewed = _gemini_review(alternate, audio)
+                        if reviewed is not None:
+                            return reviewed
+                    except Exception as exc:
+                        print(f'CAPTION_PROOFREAD: GEMINI_UNAVAILABLE; ERROR: {type(exc).__name__}')
                 print(f'CAPTION_PROOFREAD: FALLBACK_ASR_{provider}; CUES: {len(alternate)}; '
                       'TIMESTAMPS: PROVIDER_GENERATED; MANUAL_VERIFICATION: NOT_DONE')
                 return alternate
@@ -165,6 +180,8 @@ def proofread_timed_cues(cues, audio_path='transcription_audio.mp3'):
         except Exception as exc:
             print(f'CAPTION_PROOFREAD: {provider}_ERROR; ERROR: {type(exc).__name__}; '
                   'TRY_NEXT_PROVIDER')
+    if not valid_source:
+        raise RuntimeError('CAPTION_WORD_TIMINGS_UNRECOVERABLE: no reliable word-level cues; preview blocked')
     print('CAPTION_PROOFREAD: ALL_PROVIDERS_UNAVAILABLE; ORIGINAL_GROQ_RETAINED; '
           'MANUAL_VERIFICATION: NOT_DONE')
     return cues
@@ -192,6 +209,8 @@ def preserve_approved_word_edits(original_cues, reviewed_cues, approved_cues):
                 aligned = False
                 break
     if not aligned:
+        if not _word_cues_valid(approved_cues):
+            raise RuntimeError('CAPTION_MANUAL_EDIT_REALIGNMENT_REQUIRED: approved edits cannot be mapped safely')
         print('CAPTION_REVIEW: PROVIDER_TIMINGS_CHANGED; '
               'APPROVED_ORIGINAL_RETAINED; MANUAL_EDITS_PRESERVED')
         return [dict(c) for c in approved_cues]
