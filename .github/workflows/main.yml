@@ -13,6 +13,7 @@ on:
 jobs:
   build_and_publish:
     runs-on: ubuntu-24.04
+
     steps:
       - name: سحب الأكواد
         uses: actions/checkout@v4
@@ -37,6 +38,56 @@ jobs:
           deno --version
           ffmpeg -version | head -n 1
 
+      - name: Configure private yt-dlp network route
+        env:
+          YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
+        run: |
+          python - <<'PY'
+          import os
+          import shlex
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          proxy = os.getenv('YTDLP_PROXY', '').strip()
+
+          if proxy:
+              url = urlsplit(proxy)
+
+              if (
+                  url.scheme not in {
+                      'http', 'https',
+                      'socks5', 'socks5h'
+                  }
+                  or not url.hostname
+                  or '\n' in proxy
+                  or '\r' in proxy
+              ):
+                  raise SystemExit('YTDLP_PROXY_INVALID')
+
+              config = (
+                  Path.home()
+                  / '.config'
+                  / 'yt-dlp'
+                  / 'config'
+              )
+
+              config.parent.mkdir(
+                  parents=True,
+                  exist_ok=True
+              )
+
+              config.write_text(
+                  '--proxy ' + shlex.quote(proxy) + '\n',
+                  encoding='utf-8'
+              )
+
+              config.chmod(0o600)
+
+              print('YTDLP_PROXY_CONFIGURED: YES')
+          else:
+              print('YTDLP_PROXY_CONFIGURED: NO')
+          PY
+
       - name: تثبيت خط Mikhak Black للمعاينة فقط
         if: ${{ github.event.client_payload.agent_action == 'preview' }}
         run: python scripts/install_mikhak.py
@@ -47,23 +98,32 @@ jobs:
           AGENT_ACTION: ${{ github.event.client_payload.agent_action || 'prepare' }}
           CLIP_IDS: ${{ github.event.client_payload.clip_ids || '' }}
           CLIP_PLAN_REF: ${{ github.event.client_payload.clip_plan_ref || '' }}
+
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
           GH_PAT: ${{ secrets.GH_PAT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
           ASSEMBLYAI_API_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
+
           TRANSCRIPTION_PROVIDERS: groq,deepgram,assemblyai,gemini
+
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_ACCESS_TOKEN: ${{ secrets.FB_ACCESS_TOKEN }}
+
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
+
           SOURCE_VIDEO_FILE: ${{ github.event.client_payload.source_video_file || '' }}
           TELEGRAM_FILE_ID: ${{ github.event.client_payload.telegram_file_id || '' }}
+
           YT_PRIVACY_STATUS: private
+
         run: python agent.py
 
       - name: Store exact preview files for subsequent approval
