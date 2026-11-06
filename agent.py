@@ -1,3 +1,4 @@
+
 import os
 import math
 import re
@@ -9,6 +10,7 @@ import time
 import shutil
 import hashlib
 from approved_publish import publish_approved_clips
+from youtube_source import download_youtube_video
 from pathlib import Path
 from urllib.parse import unquote
 import requests
@@ -51,6 +53,7 @@ if YT_COOKIES:
     COOKIES_FILE = "cookies.txt"
     with open(COOKIES_FILE, "w", encoding="utf-8") as f:
         f.write(YT_COOKIES.replace("\\n", "\n") + "\n")
+    os.chmod(COOKIES_FILE, 0o600)
 
 
 def fetch_telegram_source():
@@ -150,7 +153,7 @@ def get_transcript(video_id, url):
     """محرك ثلاثي المراحل لسحب النص والترجمة وتخطي حظر IP السحابة"""
     global TRANSCRIPT_SOURCE
     TRANSCRIPT_SOURCE = "unknown"
-    
+
     # المرحلة 1: استخدام yt-dlp (مع الكوكيز إن وجدت) لسحب ملف الترجمة
     try:
         cmd = [
@@ -165,7 +168,7 @@ def get_transcript(video_id, url):
         else:
             pass  # Let updated yt-dlp choose supported default clients
         cmd.append(url)
-        
+
         subprocess.run(cmd, capture_output=True, text=True, timeout=65)
         sub_files = glob.glob("sub_file*.vtt")
         if sub_files:
@@ -275,11 +278,11 @@ def analyze_with_gemini(transcript_text, video_url):
         raise ValueError("مفتاح GEMINI_API_KEY غير موجود في GitHub Secrets!")
 
     client = genai.Client(api_key=GEMINI_KEY)
-    
+
     prompt = f"""
     أنت خبير سيو يوتيوب ومونتاج. بناءً على بيانات/نص الفيديو التالي:
     {transcript_text}
-    
+
     المطلوب إخراج ملف JSON صالح فقط يحتوي على المفاتيح التالية بدقة تامة:
     1. "start_time": ثانية البداية لأقوى مقطع يصلح كفيديو ريلز قصير (رقم صحيح Integer مثل 10).
     2. "end_time": ثانية النهاية للمقطع بحيث تكون المدة بين 30 إلى 55 ثانية (رقم صحيح Integer مثل 50).
@@ -290,7 +293,7 @@ def analyze_with_gemini(transcript_text, video_url):
     7. "quora_ar": منشور احترافي لمنصة Quora باللغة العربية يلتزم بسياسة النشر، مدمج بداخل نصه رابط الفيديو ({video_url})، ويحتوي على هاشتاج واحد فقط.
     8. "quora_en": منشور احترافي لمنصة Quora باللغة الإنجليزية يلتزم بسياسة النشر، مدمج بداخل نصه رابط الفيديو ({video_url})، ويحتوي على هاشتاج واحد فقط.
     """
-    
+
     models_to_try = [
         'gemini-3.1-pro-preview',
         'gemini-3.1-flash-preview',
@@ -298,7 +301,7 @@ def analyze_with_gemini(transcript_text, video_url):
         'gemini-3-flash-preview'
     ]
     last_err = None
-    
+
     for model_name in models_to_try:
         try:
             response = client.models.generate_content(
@@ -312,7 +315,7 @@ def analyze_with_gemini(transcript_text, video_url):
         except Exception as e:
             print(f"⚠️ فشلت محاولة النموذج {model_name} ({type(e).__name__}: {str(e)[:180]})، جاري تجربة البديل...")
             last_err = e
-            
+
     raise last_err
 
 
@@ -331,30 +334,8 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
         if os.getenv("TELEGRAM_FILE_ID", "").strip():
             raise RuntimeError("TELEGRAM_MP4_UNAVAILABLE: a Telegram file ID was supplied but no validated local MP4 is available; refusing YouTube fallback")
         print("SOURCE: YOUTUBE_DOWNLOAD; TELEGRAM_FILE_ID: ABSENT")
-        cmd = ["yt-dlp", "--no-playlist", "--no-progress", "--newline",
-               "--retries", "3", "--fragment-retries", "3", "--socket-timeout", "25",
-               "--merge-output-format", "mp4", "-f",
-               "bv*[height<=1080]+ba/b[height<=1080]/b", "-o", "input.%(ext)s"]
-        if COOKIES_FILE:
-            cmd += ["--cookies", COOKIES_FILE]
-        # Keep client selection managed by yt-dlp defaults; use PO-token provider only if configured.
-        cmd.append(url)
-        last_error = ""
-        for attempt in range(2):
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode == 0:
-                candidates = [x for x in Path('.').glob('input.*') if x.suffix.lower() in ('.mp4','.mkv','.webm')]
-                if candidates:
-                    target = candidates[0]
-                    break
-            last_error = (result.stderr or result.stdout)[-1400:]
-            if any(marker in last_error.lower() for marker in ('sign in to confirm', 'this helps protect our community', 'cookies for the authentication')):
-                raise RuntimeError('YOUTUBE_AUTH_REQUIRED: YouTube requires session verification. Provide a permitted source MP4 via SOURCE_VIDEO_FILE or valid account cookies. ' + last_error[-350:])
-            if '403' in last_error or 'po token' in last_error.lower():
-                raise RuntimeError('YOUTUBE_ACCESS_RESTRICTED: Check PO Token provider / IP restrictions and yt-dlp verbose log. ' + last_error[-600:])
-            time.sleep(3 * (attempt + 1))
-        else:
-            raise RuntimeError('VIDEO_DOWNLOAD_FAILED: ' + last_error[-700:])
+        target = download_youtube_video(url, COOKIES_FILE)
+        print("SOURCE: YOUTUBE_DOWNLOAD; VIDEO_RECEIVED: YES")
     probe = subprocess.run(['ffprobe','-v','error','-show_entries','format=duration',
                             '-of','default=noprint_wrappers=1:nokey=1',str(target)],
                            capture_output=True,text=True,check=True)
@@ -384,7 +365,7 @@ def upload_to_facebook(video_path, title, description):
     """رفع الفيديو على صفحة فيسبوك عبر Graph API"""
     if not FB_PAGE_ID or not FB_TOKEN:
         return "⏭️ فيسبوك: لم يتم ضبط المفاتيح بعد (تم التخطي)."
-    
+
     try:
         url = f"https://graph-video.facebook.com/v21.0/{FB_PAGE_ID}/videos"
         caption = f"{title}\n\n{description}"
@@ -403,7 +384,7 @@ def upload_to_youtube(video_path, title, description, tags_str):
     """رفع الفيديو كـ YouTube Shorts مع العنوان والوصف والتاجز"""
     if not YT_CLIENT_ID or not YT_CLIENT_SECRET or not YT_REFRESH_TOKEN:
         return "⏭️ يوتيوب: لم يتم ضبط المفاتيح بعد (تم التخطي)."
-    
+
     try:
         creds = Credentials(
             None,
@@ -414,7 +395,7 @@ def upload_to_youtube(video_path, title, description, tags_str):
         )
         youtube = build("youtube", "v3", credentials=creds)
         clean_tags = [t.strip() for t in tags_str[:490].split(",") if t.strip()]
-        
+
         body = {
             "snippet": {
                 "title": title[:100],
@@ -427,7 +408,7 @@ def upload_to_youtube(video_path, title, description, tags_str):
                 "selfDeclaredMadeForKids": False
             }
         }
-        
+
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
         request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
         response = None
@@ -555,7 +536,7 @@ if __name__ == "__main__":
         tags_500 = data['tags_string']
         chosen_title = data['short_titles'][0]
         description_block = data['description_block']
-        
+
         # 3. إرسال حزمة السيو ومنشورات Quora إلى هاتفك فوراً
         seo_msg = (
             f"🎯 العناوين الطويلة (3):\n"
@@ -573,7 +554,7 @@ if __name__ == "__main__":
         )
         send_telegram(seo_msg)
         # Quora drafts are not sent unless a separate future command requests them.
-        
+
         # SEO-only must never fetch, trim, or publish video.
         if AGENT_ACTION == 'seo':
             send_telegram('اكتمل إعداد البيانات الوصفية فقط. لم يتم قص أو نشر فيديو.')

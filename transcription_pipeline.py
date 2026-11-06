@@ -1,3 +1,4 @@
+
 """Timestamp-grounded transcript acquisition. No publishing side effects."""
 import json
 import os
@@ -5,6 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 import requests
+from youtube_source import download_youtube_audio
 
 
 def _stamp(value):
@@ -190,9 +192,16 @@ def obtain_timed_transcript(url, video_path=None, cookies_file=None,
         cues = youtube_captions(url, cookies_file)
         if cues:
             return cues, 'youtube_captions'
+    if not video_path and not prefer_local_audio:
+        # /prepare: a YouTube URL with no usable subtitles must still get
+        # timed transcription from the actual source audio, not NoEmbed title.
+        print('CAPTIONS: UNAVAILABLE; TRYING_YOUTUBE_AUDIO_DOWNLOAD')
+        video_path = str(download_youtube_audio(url, cookies_file))
+        print('YOUTUBE_AUDIO_DOWNLOADED: YES')
     if not video_path or not Path(video_path).is_file():
         return [], 'none'
-    audio = audio_from_video(video_path)
+    # yt-dlp already produced MP3 for direct transcription; do not encode twice.
+    audio = str(video_path) if Path(video_path).suffix.lower() == '.mp3' else audio_from_video(video_path)
     providers = {'groq': groq_transcribe, 'deepgram': deepgram_transcribe,
                  'assemblyai': assemblyai_transcribe, 'gemini': gemini_transcribe}
     order = [x.strip().lower() for x in os.getenv('TRANSCRIPTION_PROVIDERS', 'groq,deepgram,assemblyai,gemini').split(',')]
