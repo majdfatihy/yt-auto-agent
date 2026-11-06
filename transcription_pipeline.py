@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 import requests
 
@@ -74,6 +75,41 @@ def audio_from_video(video_path, target='transcription_audio.mp3'):
     if not Path(target).is_file() or not Path(target).stat().st_size:
         raise RuntimeError('AUDIO_EXTRACTION_EMPTY')
     return target
+
+
+def download_youtube_audio(url, cookies_file=None):
+    """Download only the source audio for /prepare when YouTube captions are absent."""
+    with tempfile.TemporaryDirectory(prefix='yt_audio_') as tmpdir:
+        output = Path(tmpdir) / 'source.%(ext)s'
+        cmd = ['yt-dlp', '--no-playlist', '--no-progress', '--newline',
+               '--retries', '3', '--fragment-retries', '3', '--socket-timeout', '25',
+               '-f', 'bestaudio/best', '-o', str(output)]
+        if cookies_file:
+            cmd += ['--cookies', cookies_file]
+        cmd.append(url)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f'YOUTUBE_AUDIO: ERROR; TYPE: {type(exc).__name__}')
+            return None
+        if result.returncode != 0:
+            error_lines = (result.stderr or result.stdout or '').strip().splitlines()
+            detail = error_lines[-1][:350] if error_lines else 'no error message'
+            print(f'YOUTUBE_AUDIO: UNAVAILABLE; EXIT_CODE: {result.returncode}; DETAIL: {detail}')
+            return None
+        candidates = [f for f in Path(tmpdir).glob('source.*')
+                      if f.is_file() and f.stat().st_size > 0
+                      and f.suffix.lower() in ('.m4a', '.webm', '.mp3', '.mp4', '.opus', '.ogg', '.mkv')]
+        if not candidates:
+            print('YOUTUBE_AUDIO: UNAVAILABLE; EXIT_CODE: 0; FILES: 0')
+            return None
+        try:
+            audio = audio_from_video(candidates[0])
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
+            print(f'YOUTUBE_AUDIO: EXTRACTION_FAILED; TYPE: {type(exc).__name__}')
+            return None
+        print('YOUTUBE_AUDIO: READY; SOURCE: YOUTUBE; AUDIO_EXTRACTION: OK')
+        return audio
 
 
 def _from_words(words):
@@ -192,9 +228,14 @@ def obtain_timed_transcript(url, video_path=None, cookies_file=None,
         cues = youtube_captions(url, cookies_file)
         if cues:
             return cues, 'youtube_captions'
-    if not video_path or not Path(video_path).is_file():
+    if video_path and Path(video_path).is_file():
+        audio = audio_from_video(video_path)
+    elif not prefer_local_audio:
+        audio = download_youtube_audio(url, cookies_file)
+        if not audio:
+            return [], 'none'
+    else:
         return [], 'none'
-    audio = audio_from_video(video_path)
     providers = {'groq': groq_transcribe, 'deepgram': deepgram_transcribe,
                  'assemblyai': assemblyai_transcribe, 'gemini': gemini_transcribe}
     order = [x.strip().lower() for x in os.getenv('TRANSCRIPTION_PROVIDERS', 'groq,deepgram,assemblyai,gemini').split(',')]
