@@ -1,10 +1,8 @@
-
 """Timestamp-grounded transcript acquisition. No publishing side effects."""
 import json
 import os
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 import requests
 
@@ -44,35 +42,6 @@ def parse_vtt(raw):
     return cues
 
 
-def _yt_dlp_network_options():
-    """Use a user-controlled proxy only when configured; do not log its URL."""
-    proxy = os.getenv('YT_DLP_PROXY', '').strip()
-    return ['--proxy', proxy] if proxy else []
-
-
-def _youtube_error_category(message):
-    lower = message.lower()
-    if "sign in to confirm" in lower or "not a bot" in lower:
-        return 'BOT_CHECK'
-    if 'http error 403' in lower or '403 forbidden' in lower:
-        return 'HTTP_403'
-    if 'po token' in lower or 'potoken' in lower:
-        return 'PO_TOKEN_REQUIRED'
-    if 'private video' in lower or 'members-only' in lower:
-        return 'RESTRICTED_CONTENT'
-    if 'unsupported url' in lower:
-        return 'UNSUPPORTED_URL'
-    if 'timed out' in lower or 'timeout' in lower:
-        return 'TIMEOUT'
-    return 'OTHER'
-
-
-def _public_error_detail(message):
-    """Never print cookies, proxy URI or arbitrary credentials in remote output."""
-    category = _youtube_error_category(message)
-    return category
-
-
 def youtube_captions(url, cookies_file=None, directory='captions_cache'):
     out = Path(directory)
     out.mkdir(exist_ok=True)
@@ -80,7 +49,6 @@ def youtube_captions(url, cookies_file=None, directory='captions_cache'):
            '--sub-langs', 'ar.*,en.*', '--sub-format', 'vtt', '-o', str(out / '%(id)s.%(ext)s')]
     if cookies_file:
         cmd += ['--cookies', cookies_file]
-    cmd += _yt_dlp_network_options()
     cmd.append(url)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -95,8 +63,7 @@ def youtube_captions(url, cookies_file=None, directory='captions_cache'):
         if cues:
             print(f'CAPTIONS: YOUTUBE; CUES: {len(cues)}; FILE: {file.name}')
             return cues
-    problem = _public_error_detail(result.stderr or result.stdout or '')
-    print(f'CAPTIONS: UNAVAILABLE; EXIT_CODE: {result.returncode}; FILES: {len(files)}; REASON: {problem}')
+    print(f'CAPTIONS: UNAVAILABLE; EXIT_CODE: {result.returncode}; FILES: {len(files)}')
     return []
 
 
@@ -106,53 +73,6 @@ def audio_from_video(video_path, target='transcription_audio.mp3'):
     if not Path(target).is_file() or not Path(target).stat().st_size:
         raise RuntimeError('AUDIO_EXTRACTION_EMPTY')
     return target
-
-
-def download_youtube_audio(url, cookies_file=None):
-    """Try audio download with optional cookies/proxy and one limited public fallback.
-
-    This does not defeat YouTube login/bot enforcement. If access is denied,
-    provide a source file or use a network/account authorized to access it.
-    """
-    with tempfile.TemporaryDirectory(prefix='yt_audio_') as tmpdir:
-        output = Path(tmpdir) / 'source.%(ext)s'
-        common = ['yt-dlp', '--no-playlist', '--no-progress', '--newline',
-                  '--retries', '2', '--fragment-retries', '2', '--socket-timeout', '25',
-                  '-f', 'bestaudio/best', '-o', str(output)]
-        network = _yt_dlp_network_options()
-        attempts = [('DEFAULT', common + (['--cookies', cookies_file] if cookies_file else []) + network)]
-        # A failed browser session can sometimes be avoided for public, embeddable videos.
-        # This is NOT an authentication bypass and will also fail if YouTube blocks the IP.
-        attempts.append(('PUBLIC_EMBEDDED', common + network +
-                         ['--extractor-args', 'youtube:player_client=web_embedded']))
-        for mode, args in attempts:
-            cmd = args + [url]
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                print(f'YOUTUBE_AUDIO: ERROR; MODE: {mode}; TYPE: {type(exc).__name__}')
-                continue
-            candidates = [f for f in Path(tmpdir).glob('source.*')
-                          if f.is_file() and f.stat().st_size > 0
-                          and f.suffix.lower() in ('.m4a', '.webm', '.mp3', '.mp4', '.opus', '.ogg', '.mkv')]
-            if result.returncode == 0 and candidates:
-                try:
-                    audio = audio_from_video(candidates[0])
-                except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
-                    print(f'YOUTUBE_AUDIO: EXTRACTION_FAILED; MODE: {mode}; TYPE: {type(exc).__name__}')
-                    return None
-                print(f'YOUTUBE_AUDIO: READY; MODE: {mode}; SOURCE: YOUTUBE; AUDIO_EXTRACTION: OK')
-                return audio
-            reason = _public_error_detail(result.stderr or result.stdout or '')
-            print(f'YOUTUBE_AUDIO: UNAVAILABLE; MODE: {mode}; EXIT_CODE: {result.returncode}; REASON: {reason}')
-            if reason in ('RESTRICTED_CONTENT', 'UNSUPPORTED_URL'):
-                break
-            # Discard partial files before trying another public-client mode.
-            for partial in Path(tmpdir).glob('source.*'):
-                if partial.is_file():
-                    partial.unlink()
-        print('YOUTUBE_AUDIO: ACCESS_DENIED_OR_UNAVAILABLE; FALLBACK: SOURCE_MP4_OR_AUTHORIZED_NETWORK')
-        return None
 
 
 def _from_words(words):
@@ -177,8 +97,8 @@ def groq_transcribe(path, word_timestamps=False):
             headers={'Authorization': f'Bearer {key}'},
             data={'model': os.getenv('GROQ_TRANSCRIPTION_MODEL', 'whisper-large-v3'),
                   'response_format': 'verbose_json',
-                  'timestamp_granularities[]': 'word' if word_timestamps else 'segment'},
-            files={'file': (Path(path).name, file, 'audio/mpeg')}, timeout=180)
+                  'timestamp_granularities[]': 'word' if word_timestamps else 'segment',
+                  'language': 'ar'}, files={'file': (Path(path).name, file, 'audio/mpeg')}, timeout=180)
     response.raise_for_status()
     payload = response.json()
     observations = payload.get('words', []) if word_timestamps else payload.get('segments', [])
@@ -191,9 +111,8 @@ def deepgram_transcribe(path):
         return []
     with open(path, 'rb') as file:
         response = requests.post('https://api.deepgram.com/v1/listen',
-            params=[('model', os.getenv('DEEPGRAM_MODEL', 'nova-3')),
-                    ('language', 'multi'), ('language_hint', 'ar'), ('language_hint', 'en'),
-                    ('punctuate', 'true'), ('smart_format', 'true')],
+            params={'model': os.getenv('DEEPGRAM_MODEL', 'nova-3'), 'language': 'ar-EG',
+                    'punctuate': 'true', 'smart_format': 'true'},
             headers={'Authorization': f'Token {key}', 'Content-Type': 'audio/mpeg'},
             data=file, timeout=180)
     response.raise_for_status()
@@ -211,7 +130,7 @@ def assemblyai_transcribe(path):
     upload.raise_for_status()
     job = requests.post('https://api.assemblyai.com/v2/transcript', headers=headers,
         json={'audio_url': upload.json()['upload_url'], 'speech_models': ['universal-3-pro', 'universal-2'],
-              'language_detection': True, 'language_detection_options': {'code_switching': True}}, timeout=30)
+              'language_code': 'ar'}, timeout=30)
     job.raise_for_status()
     job_id = job.json()['id']
     import time
@@ -271,14 +190,9 @@ def obtain_timed_transcript(url, video_path=None, cookies_file=None,
         cues = youtube_captions(url, cookies_file)
         if cues:
             return cues, 'youtube_captions'
-    if video_path and Path(video_path).is_file():
-        audio = audio_from_video(video_path)
-    elif not prefer_local_audio:
-        audio = download_youtube_audio(url, cookies_file)
-        if not audio:
-            return [], 'none'
-    else:
+    if not video_path or not Path(video_path).is_file():
         return [], 'none'
+    audio = audio_from_video(video_path)
     providers = {'groq': groq_transcribe, 'deepgram': deepgram_transcribe,
                  'assemblyai': assemblyai_transcribe, 'gemini': gemini_transcribe}
     order = [x.strip().lower() for x in os.getenv('TRANSCRIPTION_PROVIDERS', 'groq,deepgram,assemblyai,gemini').split(',')]

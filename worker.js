@@ -9,11 +9,12 @@ const MENU = [
   '/prepare — اقتراح مقاطع مرقمة فقط',
   '1 أو 1,3 أو /clip 1,3 — معاينة المقاطع المختارة فقط',
   '/seo — بيانات وصفية عند الطلب فقط',
-  '/publish — متوقف حتى موافقتك على المعاينة',
+  '/approve 1 — اعتماد معاينة المقطع 1',
+  '/publish — نشر المعاينة المعتمدة فقط على يوتيوب (خاص)',
   '/status — آخر مصدر',
   '/cancel — إلغاء المصدر والاقتراحات',
   '/menu — القائمة',
-  'لا يوجد نشر تلقائي أو كابشنز داخل الفيديو في هذه المرحلة.'
+  'لا يتم النشر دون /approve ثم /publish.'
 ].join('\n');
 
 function getLink(m) { return ((m.text || m.caption || '').match(YT) || [])[0]?.replace(/[.,)]+$/, '') || ''; }
@@ -51,6 +52,24 @@ async function readPlan(env) {
   try { plan = JSON.parse((await r.json()).value); }
   catch { throw Error('Invalid stored clip plan'); }
   return plan;
+}
+async function writePlan(env, plan) {
+  const r = await github(env, '/actions/variables/TELEGRAM_CLIP_PROPOSALS',
+    'PATCH', {value: JSON.stringify(plan)});
+  if (r.status !== 204) throw Error(`GitHub plan update HTTP ${r.status}`);
+}
+async function requirePreviewArtifact(env, plan) {
+  const run = String(plan.preview_run_id || '');
+  if (!/^[0-9]+$/.test(run)) throw Error('المعاينة لم تُحفظ في GitHub بعد. أعد /clip.');
+  const r = await github(env, `/actions/runs/${run}/artifacts`);
+  if (!r.ok) throw Error(`GitHub preview artifact lookup HTTP ${r.status}`);
+  const artifacts = (await r.json()).artifacts || [];
+  if (!artifacts.some(a => a.name === `preview-${run}` && !a.expired))
+    throw Error('ملف المعاينة غير جاهز أو انتهت صلاحيته. أعد المحاولة بعد اكتمال GitHub Actions.');
+}
+function sameSource(source, plan) {
+  return source.video_url === plan.video_url &&
+    (source.telegram_file_id || '') === (plan.telegram_file_id || '');
 }
 async function clearPlan(env) {
   const r = await github(env, '/actions/variables/TELEGRAM_CLIP_PROPOSALS');
@@ -96,14 +115,59 @@ async function processUpdate(env, update) {
   const source = JSON.parse(await env.BOT_STATE.get(key) || '{}');
 
   if (['/menu', '/help', '/start'].includes(cmd)) return send(env, MENU);
-  if (cmd === '/status') return send(env, 'آخر مصدر محفوظ: ' + (source.video_url || 'لا يوجد'));
+  if (cmd === '/status') {
+    const plan = await readPlan(env);
+    return send(env, 'آخر مصدر محفوظ: ' + (source.video_url || 'لا يوجد') +
+      '\nحالة المعالجة: ' + (plan?.status || 'لا توجد معاينة'));
+  }
   if (cmd === '/cancel') {
+    const existing = await readPlan(env);
+    if (['publish_queued', 'publishing'].includes(existing?.status))
+      return send(env, 'لا يمكن إلغاء نشر بدأ بالفعل. راجع /status وGitHub Actions.');
     await clearPlan(env);
     await env.BOT_STATE.put(key, '{}');
     return send(env, 'تم إلغاء المصدر والاقتراحات. لم يُنشر شيء.');
   }
-  if (cmd === '/publish')
-    return send(env, 'النشر متوقف حتى الموافقة الصريحة على المعاينة.');
+  if (cmd === '/approve') {
+    try {
+      const plan = await readPlan(env);
+      if (!plan || plan.status !== 'previewed_awaiting_approval')
+        throw Error('لا توجد معاينة تنتظر الموافقة. استخدم /clip أولًا.');
+      if (!sameSource(source, plan)) throw Error('المعاينة لا تطابق الفيديو الحالي.');
+      const raw = text.slice(text.split(/\s+/)[0].length).trim();
+      const ids = parseChoices(raw, plan);
+      if (!ids.every(id => (plan.previewed_ids || []).includes(id)))
+        throw Error('يمكن اعتماد مقاطع تمت معاينتها فقط.');
+      await requirePreviewArtifact(env, plan);
+      plan.approved_ids = ids;
+      plan.approval_utc = new Date().toISOString();
+      plan.status = 'approved';
+      await writePlan(env, plan);
+      return send(env, 'تم اعتماد المقاطع ' + ids.join(', ') + '. للنشر أرسل /publish.');
+    } catch (e) { return send(env, String(e.message || e)); }
+  }
+  if (cmd === '/publish') {
+    try {
+      const plan = await readPlan(env);
+      if (!plan || plan.status !== 'approved' || !Array.isArray(plan.approved_ids) ||
+          !plan.approved_ids.length || !plan.approval_utc)
+        throw Error('النشر غير مسموح. يجب إرسال /approve 1 بعد المعاينة أولًا.');
+      if (!sameSource(source, plan)) throw Error('المعاينة المعتمدة تخص مصدرًا آخر.');
+      await requirePreviewArtifact(env, plan);
+      plan.status = 'publish_queued';
+      await writePlan(env, plan);
+      try {
+        await dispatch(env, plan, 'publish', {clip_ids: plan.approved_ids.join(','),
+          clip_plan_ref: plan.created_utc});
+      } catch (err) {
+        plan.status = 'approved';
+        await writePlan(env, plan);
+        throw err;
+      }
+      return send(env, 'تم إرسال طلب نشر المقاطع المعتمدة فقط: ' +
+        plan.approved_ids.join(', ') + '. سيتم الرفع كفيديو خاص.');
+    } catch (e) { return send(env, String(e.message || e)); }
+  }
 
   if (cmd === '/clip' || /^[0-9٠-٩۰-۹]+(?:[\s,،.]+[0-9٠-٩۰-۹]+)*$/.test(text)) {
     const choiceText = cmd === '/clip' ? text.slice(text.split(/\s+/)[0].length).trim() : text;
@@ -126,6 +190,9 @@ async function processUpdate(env, update) {
     if (!selected.video_url) return send(env, 'أرسل رابط يوتيوب أو MP4 مع رابط أولًا.');
     if (media && (media.file_size || 0) > MAX_MP4) return send(env, 'ملف MP4 أكبر من 20MB.');
     if (cmd === '/prepare') {
+      const existing = await readPlan(env);
+      if (['publish_queued', 'publishing'].includes(existing?.status))
+        return send(env, 'هناك نشر قيد التنفيذ؛ لا يمكن تغيير المصدر الآن.');
       await clearPlan(env);
       await env.BOT_STATE.put(key, JSON.stringify(selected));
     }
@@ -134,6 +201,9 @@ async function processUpdate(env, update) {
       'تم طلب اقتراح توقيتات فقط، دون قص أو نشر.');
   }
   if (link) {
+    const existing = await readPlan(env);
+    if (['publish_queued', 'publishing'].includes(existing?.status))
+      return send(env, 'هناك نشر قيد التنفيذ؛ لا يمكن تغيير المصدر الآن.');
     if (media && (media.file_size || 0) > MAX_MP4) return send(env, 'ملف MP4 أكبر من حد التنزيل 20MB.');
     await clearPlan(env);
     await env.BOT_STATE.put(key, JSON.stringify(

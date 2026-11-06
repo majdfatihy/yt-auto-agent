@@ -312,7 +312,7 @@ def load_clip_plan():
     return plan
 
 
-def record_preview_result(expected_reference, clip_ids):
+def record_preview_result(expected_reference, clip_ids, run_id=None):
     """Avoid overwriting a newer /prepare list after rendering an old selection."""
     latest = load_clip_plan()
     if plan_reference(latest) != expected_reference:
@@ -320,4 +320,7 @@ def record_preview_result(expected_reference, clip_ids):
     latest['status'] = 'previewed_awaiting_approval'
     latest['previewed_ids'] = clip_ids
     latest['previewed_utc'] = datetime.now(timezone.utc).isoformat()
+    latest['preview_run_id'] = str(run_id or os.getenv('GITHUB_RUN_ID', '')).strip()
+    if not latest['preview_run_id'].isdigit():
+        raise RuntimeError('PREVIEW_RUN_ID_MISSING: refuse approval without an artifact run')
     save_clip_plan(latest)

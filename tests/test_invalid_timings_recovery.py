@@ -1,10 +1,8 @@
-
 import unittest
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 import transcript_proofreader as pr
-
 
 class InvalidTimingsRecoveryTests(unittest.TestCase):
     def setUp(self):
@@ -12,16 +10,12 @@ class InvalidTimingsRecoveryTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.audio = Path(self.temp.name) / 'audio.mp3'
         self.audio.write_bytes(b'dummy')
-        self.invalid = [
-            {'start': 0.1, 'end': 1.0, 'text': 'اهلا بكم'},
-            {'start': 1.0, 'end': 2.0, 'text': 'يا شباب'}
-        ]
-        self.valid = [
-            {'start': .1, 'end': .4, 'text': 'اهلا'},
-            {'start': .4, 'end': 1., 'text': 'بكم'},
-            {'start': 1., 'end': 1.5, 'text': 'يا'},
-            {'start': 1.5, 'end': 2., 'text': 'شباب'}
-        ]
+        self.invalid = [{'start': 0.1, 'end': 1.0, 'text': 'اهلا بكم'},
+                        {'start': 1.0, 'end': 2.0, 'text': 'يا شباب'}]
+        self.valid = [{'start': .1, 'end': .4, 'text': 'اهلا'},
+                      {'start': .4, 'end': 1., 'text': 'بكم'},
+                      {'start': 1., 'end': 1.5, 'text': 'يا'},
+                      {'start': 1.5, 'end': 2., 'text': 'شباب'}]
 
     def test_invalid_source_recovers_word_cues_then_gemini(self):
         corrected = [dict(c) for c in self.valid]
@@ -45,7 +39,6 @@ class InvalidTimingsRecoveryTests(unittest.TestCase):
         approved[0]['text'] = 'أهلا بكم'
         with self.assertRaisesRegex(RuntimeError, 'CAPTION_MANUAL_EDIT_REALIGNMENT_REQUIRED'):
             pr.preserve_approved_word_edits(self.invalid, self.valid, approved)
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -63,7 +63,7 @@ class ClipChoicesTests(unittest.TestCase):
         plan = sample_plan()
         with patch('clip_planner.load_clip_plan', return_value=plan), \
              patch('clip_planner.save_clip_plan') as saved:
-            record_preview_result(plan_reference(plan), [1, 3])
+            record_preview_result(plan_reference(plan), [1, 3], run_id='12345')
             result = saved.call_args.args[0]
             self.assertEqual(result['status'], 'previewed_awaiting_approval')
             self.assertEqual(result['previewed_ids'], [1, 3])

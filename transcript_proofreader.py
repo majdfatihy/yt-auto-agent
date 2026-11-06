@@ -1,4 +1,3 @@
-
 """Audio-grounded, conservative proofreading for timed preview subtitles.
 
 Priority: Gemini listening to source audio -> Deepgram ASR -> AssemblyAI ASR.

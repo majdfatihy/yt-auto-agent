@@ -64,3 +64,12 @@ jobs:
           TELEGRAM_FILE_ID: ${{ github.event.client_payload.telegram_file_id || '' }}
           YT_PRIVACY_STATUS: private
         run: python agent.py
+
+      - name: Store exact preview files for subsequent approval
+        if: ${{ github.event.client_payload.agent_action == 'preview' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ github.run_id }}
+          path: previews/
+          if-no-files-found: error
+          retention-days: 14
