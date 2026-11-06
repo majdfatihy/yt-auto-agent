@@ -44,6 +44,35 @@ def parse_vtt(raw):
     return cues
 
 
+def _yt_dlp_network_options():
+    """Use a user-controlled proxy only when configured; do not log its URL."""
+    proxy = os.getenv('YT_DLP_PROXY', '').strip()
+    return ['--proxy', proxy] if proxy else []
+
+
+def _youtube_error_category(message):
+    lower = message.lower()
+    if "sign in to confirm" in lower or "not a bot" in lower:
+        return 'BOT_CHECK'
+    if 'http error 403' in lower or '403 forbidden' in lower:
+        return 'HTTP_403'
+    if 'po token' in lower or 'potoken' in lower:
+        return 'PO_TOKEN_REQUIRED'
+    if 'private video' in lower or 'members-only' in lower:
+        return 'RESTRICTED_CONTENT'
+    if 'unsupported url' in lower:
+        return 'UNSUPPORTED_URL'
+    if 'timed out' in lower or 'timeout' in lower:
+        return 'TIMEOUT'
+    return 'OTHER'
+
+
+def _public_error_detail(message):
+    """Never print cookies, proxy URI or arbitrary credentials in remote output."""
+    category = _youtube_error_category(message)
+    return category
+
+
 def youtube_captions(url, cookies_file=None, directory='captions_cache'):
     out = Path(directory)
     out.mkdir(exist_ok=True)
@@ -51,6 +80,7 @@ def youtube_captions(url, cookies_file=None, directory='captions_cache'):
            '--sub-langs', 'ar.*,en.*', '--sub-format', 'vtt', '-o', str(out / '%(id)s.%(ext)s')]
     if cookies_file:
         cmd += ['--cookies', cookies_file]
+    cmd += _yt_dlp_network_options()
     cmd.append(url)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -65,7 +95,8 @@ def youtube_captions(url, cookies_file=None, directory='captions_cache'):
         if cues:
             print(f'CAPTIONS: YOUTUBE; CUES: {len(cues)}; FILE: {file.name}')
             return cues
-    print(f'CAPTIONS: UNAVAILABLE; EXIT_CODE: {result.returncode}; FILES: {len(files)}')
+    problem = _public_error_detail(result.stderr or result.stdout or '')
+    print(f'CAPTIONS: UNAVAILABLE; EXIT_CODE: {result.returncode}; FILES: {len(files)}; REASON: {problem}')
     return []
 
 
@@ -78,38 +109,50 @@ def audio_from_video(video_path, target='transcription_audio.mp3'):
 
 
 def download_youtube_audio(url, cookies_file=None):
-    """Download only the source audio for /prepare when YouTube captions are absent."""
+    """Try audio download with optional cookies/proxy and one limited public fallback.
+
+    This does not defeat YouTube login/bot enforcement. If access is denied,
+    provide a source file or use a network/account authorized to access it.
+    """
     with tempfile.TemporaryDirectory(prefix='yt_audio_') as tmpdir:
         output = Path(tmpdir) / 'source.%(ext)s'
-        cmd = ['yt-dlp', '--no-playlist', '--no-progress', '--newline',
-               '--retries', '3', '--fragment-retries', '3', '--socket-timeout', '25',
-               '-f', 'bestaudio/best', '-o', str(output)]
-        if cookies_file:
-            cmd += ['--cookies', cookies_file]
-        cmd.append(url)
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            print(f'YOUTUBE_AUDIO: ERROR; TYPE: {type(exc).__name__}')
-            return None
-        if result.returncode != 0:
-            error_lines = (result.stderr or result.stdout or '').strip().splitlines()
-            detail = error_lines[-1][:350] if error_lines else 'no error message'
-            print(f'YOUTUBE_AUDIO: UNAVAILABLE; EXIT_CODE: {result.returncode}; DETAIL: {detail}')
-            return None
-        candidates = [f for f in Path(tmpdir).glob('source.*')
-                      if f.is_file() and f.stat().st_size > 0
-                      and f.suffix.lower() in ('.m4a', '.webm', '.mp3', '.mp4', '.opus', '.ogg', '.mkv')]
-        if not candidates:
-            print('YOUTUBE_AUDIO: UNAVAILABLE; EXIT_CODE: 0; FILES: 0')
-            return None
-        try:
-            audio = audio_from_video(candidates[0])
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
-            print(f'YOUTUBE_AUDIO: EXTRACTION_FAILED; TYPE: {type(exc).__name__}')
-            return None
-        print('YOUTUBE_AUDIO: READY; SOURCE: YOUTUBE; AUDIO_EXTRACTION: OK')
-        return audio
+        common = ['yt-dlp', '--no-playlist', '--no-progress', '--newline',
+                  '--retries', '2', '--fragment-retries', '2', '--socket-timeout', '25',
+                  '-f', 'bestaudio/best', '-o', str(output)]
+        network = _yt_dlp_network_options()
+        attempts = [('DEFAULT', common + (['--cookies', cookies_file] if cookies_file else []) + network)]
+        # A failed browser session can sometimes be avoided for public, embeddable videos.
+        # This is NOT an authentication bypass and will also fail if YouTube blocks the IP.
+        attempts.append(('PUBLIC_EMBEDDED', common + network +
+                         ['--extractor-args', 'youtube:player_client=web_embedded']))
+        for mode, args in attempts:
+            cmd = args + [url]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f'YOUTUBE_AUDIO: ERROR; MODE: {mode}; TYPE: {type(exc).__name__}')
+                continue
+            candidates = [f for f in Path(tmpdir).glob('source.*')
+                          if f.is_file() and f.stat().st_size > 0
+                          and f.suffix.lower() in ('.m4a', '.webm', '.mp3', '.mp4', '.opus', '.ogg', '.mkv')]
+            if result.returncode == 0 and candidates:
+                try:
+                    audio = audio_from_video(candidates[0])
+                except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
+                    print(f'YOUTUBE_AUDIO: EXTRACTION_FAILED; MODE: {mode}; TYPE: {type(exc).__name__}')
+                    return None
+                print(f'YOUTUBE_AUDIO: READY; MODE: {mode}; SOURCE: YOUTUBE; AUDIO_EXTRACTION: OK')
+                return audio
+            reason = _public_error_detail(result.stderr or result.stdout or '')
+            print(f'YOUTUBE_AUDIO: UNAVAILABLE; MODE: {mode}; EXIT_CODE: {result.returncode}; REASON: {reason}')
+            if reason in ('RESTRICTED_CONTENT', 'UNSUPPORTED_URL'):
+                break
+            # Discard partial files before trying another public-client mode.
+            for partial in Path(tmpdir).glob('source.*'):
+                if partial.is_file():
+                    partial.unlink()
+        print('YOUTUBE_AUDIO: ACCESS_DENIED_OR_UNAVAILABLE; FALLBACK: SOURCE_MP4_OR_AUTHORIZED_NETWORK')
+        return None
 
 
 def _from_words(words):

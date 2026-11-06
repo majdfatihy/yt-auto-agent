@@ -7,6 +7,8 @@ import subprocess
 import traceback
 import time
 import shutil
+import base64
+import binascii
 from pathlib import Path
 from urllib.parse import unquote
 import requests
@@ -43,12 +45,53 @@ YT_CLIENT_ID = os.getenv("YT_CLIENT_ID", "").strip()
 YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET", "").strip()
 YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "").strip()
 
-# تجهيز ملف الكوكيز إذا كان موجوداً في الخزنة
-COOKIES_FILE = None
-if YT_COOKIES:
-    COOKIES_FILE = "cookies.txt"
-    with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-        f.write(YT_COOKIES.replace("\\n", "\n") + "\n")
+# Parse YouTube cookies without logging their contents. Accept Netscape text or base64.
+def prepare_youtube_cookies(raw, destination="cookies.txt"):
+    if not raw.strip():
+        print("YOUTUBE_COOKIES: NOT_CONFIGURED")
+        return None
+    content = raw.strip().replace("\\n", "\n").lstrip("\ufeff")
+    if not (content.startswith("#") or "\t" in content):
+        try:
+            content = base64.b64decode("".join(content.split()), validate=True).decode("utf-8-sig")
+        except (ValueError, UnicodeError, binascii.Error):
+            print("YOUTUBE_COOKIES: INVALID_FORMAT; EXPECTED: NETSCAPE_OR_BASE64")
+            return None
+    entries = []
+    for line in content.splitlines():
+        data = line.removeprefix("#HttpOnly_")
+        if not data or data.startswith("#"):
+            continue
+        fields = data.split("\t")
+        if len(fields) != 7 or fields[1].upper() not in ("TRUE", "FALSE") or fields[3].upper() not in ("TRUE", "FALSE"):
+            continue
+        try:
+            expires = int(fields[4])
+        except ValueError:
+            continue
+        entries.append((fields[0].lower(), fields[5], expires))
+    youtube_entries = [item for item in entries if item[0].lstrip(".") in ("youtube.com", "www.youtube.com", "music.youtube.com")]
+    if not entries or not youtube_entries:
+        print("YOUTUBE_COOKIES: INVALID_OR_NON_YOUTUBE; EXPECTED: NETSCAPE_COOKIE_LINES")
+        return None
+    session_keys = {"SID", "HSID", "SSID", "SAPISID", "LOGIN_INFO", "__Secure-1PSID", "__Secure-3PSID"}
+    active = [c for c in youtube_entries if c[2] <= 0 or c[2] > time.time()]
+    has_login = any(c[1] in session_keys for c in active)
+    lines = content.strip().splitlines()
+    if not lines or not lines[0].startswith(("# Netscape HTTP Cookie File", "# HTTP Cookie File")):
+        content = "# Netscape HTTP Cookie File\n" + content
+    path = Path(destination)
+    path.write_text(content.rstrip("\n") + "\n", encoding="utf-8", newline="\n")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    print(f"YOUTUBE_COOKIES: NETSCAPE_OK; YOUTUBE_ENTRIES: {len(youtube_entries)}; ACTIVE: {len(active)}; LOGIN_MARKERS: {'YES' if has_login else 'NO'}")
+    return str(path)
+
+
+# YouTube cookies from GitHub Secrets (raw Netscape or base64-encoded Netscape).
+COOKIES_FILE = prepare_youtube_cookies(YT_COOKIES)
 
 
 def fetch_telegram_source():
@@ -160,8 +203,8 @@ def get_transcript(video_id, url):
         ]
         if COOKIES_FILE:
             cmd.extend(["--cookies", COOKIES_FILE])
-        else:
-            pass  # Let updated yt-dlp choose supported default clients
+        if os.getenv("YT_DLP_PROXY", "").strip():
+            cmd.extend(["--proxy", os.environ["YT_DLP_PROXY"].strip()])
         cmd.append(url)
         
         subprocess.run(cmd, capture_output=True, text=True, timeout=65)
@@ -335,6 +378,8 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
                "bv*[height<=1080]+ba/b[height<=1080]/b", "-o", "input.%(ext)s"]
         if COOKIES_FILE:
             cmd += ["--cookies", COOKIES_FILE]
+        if os.getenv("YT_DLP_PROXY", "").strip():
+            cmd += ["--proxy", os.environ["YT_DLP_PROXY"].strip()]
         # Keep client selection managed by yt-dlp defaults; use PO-token provider only if configured.
         cmd.append(url)
         last_error = ""
@@ -346,6 +391,8 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
                     target = candidates[0]
                     break
             last_error = (result.stderr or result.stdout)[-1400:]
+            if os.getenv("YT_DLP_PROXY", "").strip():
+                last_error = last_error.replace(os.environ["YT_DLP_PROXY"].strip(), "[PROXY_REDACTED]")
             if any(marker in last_error.lower() for marker in ('sign in to confirm', 'this helps protect our community', 'cookies for the authentication')):
                 raise RuntimeError('YOUTUBE_AUTH_REQUIRED: YouTube requires session verification. Provide a permitted source MP4 via SOURCE_VIDEO_FILE or valid account cookies. ' + last_error[-350:])
             if '403' in last_error or 'po token' in last_error.lower():
