@@ -573,12 +573,12 @@ if __name__ == "__main__":
             duration = source_duration(local_source or None, timed_cues)
             plan = build_clip_plan(VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, GEMINI_KEY)
             save_clip_plan(plan)
-            summary = '✅ اقتراحات المقاطع جاهزة. اختار من الأزرار ثم اطلب المعاينة.\\n'
-            summary += '\\n'.join(
+            summary = '✅ اقتراحات المقاطع جاهزة. اختار من الأزرار ثم اطلب المعاينة.\n'
+            summary += '\n'.join(
                 f"{clip['id']}. {clip['title']} ({round(clip['start_time'])}–{round(clip['end_time'])}ث)"
                 for clip in plan['clips'])
             if plan.get('method') != 'gemini':
-                summary += '\\nبعض العناوين مقتطفات حرفية من التفريغ.'
+                summary += '\nبعض العناوين مقتطفات حرفية من التفريغ.'
             send_telegram(summary, reply_markup=_proposals_keyboard(plan))
             raise SystemExit(0)
 
