@@ -11,6 +11,7 @@ import shutil
 import hashlib
 from approved_publish import publish_approved_clips
 from youtube_source import download_youtube_video
+from drive_source import is_drive_url, download_drive_video
 from pathlib import Path
 from urllib.parse import unquote
 import requests
@@ -97,6 +98,16 @@ def fetch_telegram_source():
 # ==========================================
 # 2. دوال إرسال الرسائل والفيديو إلى تيليجرام
 # ==========================================
+def fetch_drive_source():
+    """Resolve a shared Google Drive video for a prepare or preview job."""
+    if not is_drive_url(VIDEO_URL):
+        return
+    if TELEGRAM_FILE_ID:
+        raise RuntimeError("DRIVE_SOURCE_CONFLICT: attach a Drive link alone")
+    path = download_drive_video(VIDEO_URL)
+    os.environ["SOURCE_VIDEO_FILE"] = str(path.resolve())
+
+
 def send_telegram(msg):
     """إرسال رسالة نصية إلى تيليجرام مع طباعتها في سجل GitHub"""
     print(msg)
@@ -452,6 +463,7 @@ if __name__ == "__main__":
             clips_by_id = {item['id']: item for item in plan['clips']}
             send_telegram('بدأ تجهيز معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)))
             fetch_telegram_source()
+            fetch_drive_source()
             preview_dir = Path('previews')
             preview_dir.mkdir(exist_ok=True)
             preview_manifest = {'plan_ref': expected_ref, 'preview_run_id': os.getenv('GITHUB_RUN_ID', ''),
@@ -503,19 +515,22 @@ if __name__ == "__main__":
         send_telegram(f"⏳ بدأ الوكيل مهمة {AGENT_ACTION} للفيديو:\n{VIDEO_URL}")
 
         fetch_telegram_source()
+        fetch_drive_source()
 
-        # 1. Try actual YouTube captions first, then audio transcription from the supplied MP4.
-        vid_id = extract_video_id(VIDEO_URL)
+        # 1. Obtain timed speech from the selected video source.
+        vid_id = None if is_drive_url(VIDEO_URL) else extract_video_id(VIDEO_URL)
         local_source = os.getenv("SOURCE_VIDEO_FILE", "").strip()
         timed_cues, timed_source = obtain_timed_transcript(
-            VIDEO_URL, video_path=local_source or None, cookies_file=COOKIES_FILE)
+            VIDEO_URL, video_path=local_source or None, cookies_file=COOKIES_FILE,
+            prefer_local_audio=is_drive_url(VIDEO_URL))
         timing_grounded = bool(timed_cues)
         if timing_grounded:
             save_captions(timed_cues)
             transcript = cues_to_text(timed_cues)
             print(f"TIMED_TRANSCRIPT: {timed_source}; CUES: {len(timed_cues)}")
         else:
-            transcript = get_transcript(vid_id, VIDEO_URL)
+            transcript = ('Google Drive source without timed transcription'
+                          if is_drive_url(VIDEO_URL) else get_transcript(vid_id, VIDEO_URL))
             print("TIMED_TRANSCRIPT: UNAVAILABLE; TITLE_ONLY_FALLBACK: YES")
 
         # Stage 1: /prepare lists options ONLY. Never create MP4 or generate SEO here.
