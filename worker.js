@@ -61,11 +61,11 @@ async function ensureButtonsAndMenu(env, source) {
   let message = '🎛️ لوحة بوت الريلز';
   try {
     const state = await ensureButtonWebhook(env);
-    message += state.changed ? '\\n✅ تم تفعيل استقبال الأزرار في Telegram.' :
-      '\\n✅ إعداد استقبال الأزرار مفعّل.';
-    if (state.errors) message += '\\n⚠️ آخر خطأ Webhook: ' + String(state.errors).slice(0, 120);
+    message += state.changed ? '\n✅ تم تفعيل استقبال الأزرار في Telegram.' :
+      '\n✅ إعداد استقبال الأزرار مفعّل.';
+    if (state.errors) message += '\n⚠️ آخر خطأ Webhook: ' + String(state.errors).slice(0, 120);
   } catch (e) {
-    message += '\\n⚠️ تعذّر فحص Webhook: ' + String(e.message || e).slice(0, 130);
+    message += '\n⚠️ تعذّر فحص Webhook: ' + String(e.message || e).slice(0, 130);
   }
   return showMenu(env, source, await readPlan(env), message);
 }
