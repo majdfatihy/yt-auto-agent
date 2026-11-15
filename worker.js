@@ -107,7 +107,7 @@ async function controls(env, source, plan) {
                 callback_data: 'p:preview:' + hash}]);
     if (plan.status === 'previewed_awaiting_approval' && previewIds(plan).length) {
       rows.push([{text: '✅ اعتماد المعاينة ' + previewIds(plan).join('،'),
-                  callback_data: 'p:approve:' + hash}]);
+                  callback_data: 'p:approve:' + hash + ':' + plan.preview_run_id}]);
     }
   } else if (plan.status === 'approved') {
     rows.push([{text: '🔒 تأكيد النشر الخاص', callback_data: 'p:publish:' + hash}]);
@@ -247,6 +247,8 @@ async function handleCallback(env, cb) {
     if (pieces[1] === 'approve') {
       if (plan.status !== 'previewed_awaiting_approval' || !previewIds(plan).length)
         throw Error('لا توجد معاينة جاهزة للاعتماد.');
+      if (pieces[3] !== String(plan.preview_run_id))
+        throw Error('زر اعتماد قديم. افتح القائمة لمعاينة أحدث إصدار.');
       const ids = previewIds(plan);
       if (!ids.every(id => plan.clips.some(c => c.id === id)))
         throw Error('المعاينة لا تطابق المقاطع الحالية.');
