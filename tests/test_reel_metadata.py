@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from reel_metadata import clip_transcript, generate_reel_metadata, _validate
 
@@ -16,22 +17,49 @@ class ReelMetadataTests(unittest.TestCase):
         self.assertIn('تلدا', text)
         self.assertNotIn('موضوع تاني', text)
 
-    def test_fallback_has_three_lines_and_topic_hashtags(self):
-        result = generate_reel_metadata(CUES, 0, 18, 'شحن كارت تلدا من إنستا باي', '')
-        self.assertEqual(result['method'], 'extractive_fallback')
+    def test_ai_metadata_three_lines_with_hashtags(self):
+        payload = {
+            'title': 'طريقة شحن كارت تلدا باستخدام إنستا باي',
+            'description_lines': [
+                'شرح خطوات شحن تلدا',
+                'اختيار البطاقة الإلكترونية',
+                'التأكد من التحويل'
+            ],
+            'hashtags': ['#تلدا', '#شرح', '#شورتس']
+        }
+        with patch('reel_metadata.generate_json', side_effect=
+                   lambda prompt, key, env, validator:
+                   (validator(payload), 'groq:openai/gpt-oss-120b')):
+            result = generate_reel_metadata(
+                CUES, 0, 18, 'طريقة شحن تلدا من إنستا باي', '')
+        self.assertEqual(result['method'], 'groq:openai/gpt-oss-120b')
         self.assertLessEqual(len(result['title']), 100)
         self.assertEqual(len(result['description'].splitlines()), 4)
-        self.assertIn('#', result['description'])
-        self.assertNotIn('https://', result['description'])
+        self.assertIn('#تلدا', result['description'])
         self.assertNotIn('youtu.be', result['description'])
+
+    def test_no_raw_title_fallback_if_ai_unavailable(self):
+        with patch('reel_metadata.generate_json', side_effect=RuntimeError('API unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'REEL_METADATA_NOT_READY'):
+                generate_reel_metadata(CUES, 0, 18, 'مقتطف: مرحبا يا شباب', '')
+
+    def test_unrelated_title_rejected_even_with_structured_json(self):
+        payload = {'title': 'كيفية تحديث نظام ويندوز في الكمبيوتر',
+                   'description_lines': [
+                       'شرح تحديث ويندوز', 'حل مشكلة الكمبيوتر', 'إعدادات نظام التشغيل'],
+                   'hashtags': ['#ويندوز', '#كمبيوتر', '#شرح']}
+        with patch('reel_metadata.generate_json', side_effect=lambda prompt, key, env, validator:
+                   (validator(payload), 'gemini:gemini-3.8-flash')):
+            with self.assertRaisesRegex(ValueError, 'NOT_GROUNDED'):
+                generate_reel_metadata(CUES, 0, 18, 'شحن تلدا', '')
 
     def test_reject_link_and_invalid_hashtags(self):
         with self.assertRaisesRegex(ValueError, 'INVALID_DESCRIPTION_TEXT'):
-            _validate({'title': 'شرح شحن تلدا', 'description_lines': [
+            _validate({'title': 'طريقة شحن كارت تلدا', 'description_lines': [
                 'خطوات شحن كارت تلدا', 'رابط https://youtu.be/abc', 'فحص التحويل الآن'
             ], 'hashtags': ['#تلدا', '#انستاباي', '#شورتس']})
         with self.assertRaisesRegex(ValueError, 'INVALID_HASHTAG_FORMAT'):
-            _validate({'title': 'شرح شحن تلدا', 'description_lines': [
+            _validate({'title': 'طريقة شحن كارت تلدا', 'description_lines': [
                 'خطوات شحن كارت تلدا', 'طريقة استخدام انستا باي', 'فحص التحويل بشكل صحيح'
             ], 'hashtags': ['#تلدا', '#غير صالح', '#شورتس']})
 

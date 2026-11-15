@@ -6,6 +6,8 @@ import json
 import os
 import re
 from collections import Counter
+from text_ai import generate_json
+from reel_title_quality import valid_title
 
 STOP_WORDS = {
     'اللي', 'الذي', 'التي', 'ان', 'إن', 'على', 'علي', 'وفي', 'الى', 'إلى', 'هذا',
@@ -39,7 +41,7 @@ def _validate(value):
     title = re.sub(r'\s+', ' ', str(value.get('title') or '')).strip()
     lines = value.get('description_lines')
     hashtags = value.get('hashtags')
-    if not 8 <= len(title) <= 100 or URL.search(title):
+    if not valid_title(title) or URL.search(title):
         raise ValueError('REEL_METADATA_INVALID_TITLE')
     if not isinstance(lines, list) or len(lines) != 3:
         raise ValueError('REEL_METADATA_INVALID_DESCRIPTION_LINES')
@@ -97,36 +99,37 @@ def _fallback(transcript, suggested_title):
 def generate_reel_metadata(cues, start, end, suggested_title, api_key=None):
     """Generate a distinct, source-link-free metadata block for each selected reel."""
     transcript = clip_transcript(cues, start, end)
-    key = (api_key or '').strip()
-    if key:
-        from google import genai
-        client = genai.Client(api_key=key)
-        prompt = (
-            'اكتب بيانات وصفية عربية لفيديو قصير بناءً حصريًا على الكلام المفرّغ من '
-            'هذا المقطع المحدد، لا على الفيديو الكامل. لا تخترع ميزات أو نتائج أو أرقام '
-            'لم ينطق بها المتحدث. لا تضع رابطًا أو طلبًا لمشاهدة الفيديو الأصلي. '
-            'أعد JSON صالحًا فقط بالمفاتيح: title نص عنوان عربي واضح ومحدد أقل من 100 حرف؛ '
-            'description_lines مصفوفة من ثلاث جمل قصيرة مفيدة للبحث تلخص ما قيل فعلًا؛ '
-            'hashtags مصفوفة من 3 إلى 6 هاشتاغات قصيرة، بينها هاشتاغات متخصصة متصلة '
-            'بموضوع المقطع حرفيًا وأخرى عامة، بدون مسافات داخل الهاشتاغ. '
-            'تجنب التعبيرات المبالغ فيها أو الكلمات العامة غير المتعلقة بالمقطع. '
-            'العنوان الاقتراحي (ليس مصدرًا للمعلومات): ' + str(suggested_title or '') +
-            '\nالتفريغ النصي الفعلي للمقطع:\n' + transcript[:6500]
-        )
-        models = [x.strip() for x in os.getenv(
-            'REEL_METADATA_MODELS', 'gemini-3-flash-preview,gemini-2.5-flash'
-        ).split(',') if x.strip()]
-        for model in models:
-            try:
-                answer = client.models.generate_content(
-                    model=model, contents=prompt,
-                    config={'response_mime_type': 'application/json'}
-                )
-                result = _validate(json.loads(answer.text))
-                result['method'] = 'gemini:' + model
-                return result
-            except Exception as error:
-                print('REEL_METADATA_AI_RETRY:', model, type(error).__name__)
-    result = _fallback(transcript, suggested_title)
-    result['method'] = 'extractive_fallback'
+    prompt = (
+        'اكتب بيانات SEO عربية للنشر لشورتس مبني حصريًا على الكلام المسموع '
+        'في الفترة المحددة من الفيديو. لا تعتمد على موضوع الفيديو الكامل. '
+        'لا تُدخل معلومات أو ميزات أو نتائج أو أرقام غير منطوقة. '
+        'العنوان لازم يكون بحثيًا محددًا ومتكامل المعنى، من 15 إلى 100 حرف، '
+        'يحوي كلمة موضوعية مذكورة حرفيًا في التفريغ، ولا يبدأ بتحية أو '
+        '(مقتطف، وبعد كده، اسمه، هتكمل، هنا بيقول). '
+        'description_lines = 3 جمل موجزة مرتبطة بالموضوع، بدون روابط؛ '
+        'hashtags = قائمة 3 إلى 6 هاشتاغات حقيقية عامة ومتخصصة. '
+        'لا تضف رابط الفيديو الأصلي، ولا تعد بالمزيد منه. '
+        'أعد JSON فقط بالشكل: '
+        '{"title":"عنوان دقيق","description_lines":["جملة 1","جملة 2","جملة 3"],'
+        '"hashtags":["#موضوع","#شرح","#شورتس"]}. '
+        'العنوان المقترح للاستئناس لا ليكون مصدر معلومات: ' + str(suggested_title or '') +
+        '\\nالتفريغ الحقيقي للمقطع:\\n' + transcript[:6500]
+    )
+    def validate_on_clip(payload):
+        result = _validate(payload)
+        if not valid_title(result['title'], transcript):
+            raise ValueError('REEL_METADATA_TITLE_NOT_GROUNDED_IN_CLIP')
+        return result
+
+    try:
+        result, provider = generate_json(
+            prompt, (api_key or '').strip(), 'REEL_METADATA_MODELS',
+            validate_on_clip)
+    except RuntimeError as error:
+        # No raw excerpts or invented boilerplate may reach approved publishing.
+        raise RuntimeError(
+            'REEL_METADATA_NOT_READY: تعذر توليد عنوان ووصف مناسبين للمقطع. '
+            'لم يتم اعتماد المعاينة أو النشر. ' + str(error)
+        ) from error
+    result['method'] = provider
     return result
