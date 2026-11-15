@@ -2,10 +2,11 @@
 // Cloudflare Secrets: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GITHUB_PAT, TELEGRAM_WEBHOOK_SECRET
 // Cloudflare Var: GITHUB_REPO (owner/repo); KV binding: BOT_STATE.
 const YT = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?[^\s]*v=|shorts\/|live\/)|youtu\.be\/)[^\s]+/i;
+const DRIVE = /^https:\/\/(?:www\.)?drive\.google\.com\/(?:file\/d\/[A-Za-z0-9_-]{15,}(?:\/|$)|(?:open|uc)\?id=[A-Za-z0-9_-]{15,}(?:&|$))/i;
 const MAX_MP4 = 20 * 1024 * 1024;
 const MENU = [
   'لوحة وكيل يوتيوب — المرحلة الثانية',
-  'أرسل رابط يوتيوب أو MP4 مع رابطه لحفظه فقط.',
+  'أرسل رابط يوتيوب أو رابط فيديو Google Drive أو MP4 مع رابطه لحفظه فقط.',
   '/prepare — اقتراح مقاطع مرقمة فقط',
   '1 أو 1,3 أو /clip 1,3 — معاينة المقاطع المختارة فقط',
   '/seo — بيانات وصفية عند الطلب فقط',
@@ -17,7 +18,14 @@ const MENU = [
   'لا يتم النشر دون /approve ثم /publish.'
 ].join('\n');
 
-function getLink(m) { return ((m.text || m.caption || '').match(YT) || [])[0]?.replace(/[.,)]+$/, '') || ''; }
+function getLink(m) {
+  const candidates = (m.text || m.caption || '').match(/https?:\/\/[^\s<>]+/gi) || [];
+  for (const raw of candidates) {
+    const link = raw.replace(/[.,)]+$/, '');
+    if (YT.test(link) || DRIVE.test(link)) return link;
+  }
+  return '';
+}
 function getMp4(m) {
   const v = m.document || m.video;
   return v && ((v.file_name || '').toLowerCase().endsWith('.mp4') ||
@@ -187,7 +195,7 @@ async function processUpdate(env, update) {
   }
   if (cmd === '/prepare' || cmd === '/seo') {
     const selected = link ? {video_url: link, telegram_file_id: media?.file_id || ''} : source;
-    if (!selected.video_url) return send(env, 'أرسل رابط يوتيوب أو MP4 مع رابط أولًا.');
+    if (!selected.video_url) return send(env, 'أرسل رابط يوتيوب أو رابط فيديو Google Drive أولًا.');
     if (media && (media.file_size || 0) > MAX_MP4) return send(env, 'ملف MP4 أكبر من 20MB.');
     if (cmd === '/prepare') {
       const existing = await readPlan(env);
