@@ -20,9 +20,9 @@ function getMp4(m) {
 async function telegram(env, method, data) {
   const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`,
     {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(data)});
-  if (!r.ok) throw Error(`Telegram HTTP ${r.status}`);
-  const j = await r.json();
-  if (!j.ok) throw Error('Telegram API error');
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) throw Error('Telegram ' + method + ' HTTP ' + r.status + ': ' +
+    String(j.description || 'API request failed').slice(0, 180));
   return j.result;
 }
 async function send(env, text, reply_markup = null) {
@@ -30,6 +30,44 @@ async function send(env, text, reply_markup = null) {
     chat_id: env.TELEGRAM_CHAT_ID, text,
     ...(reply_markup ? {reply_markup} : {})
   });
+}
+// Telegram keeps an older allowed_updates filter unless setWebhook changes it.
+// Button clicks are callback_query updates; a message-only webhook silently drops them.
+async function ensureButtonWebhook(env) {
+  const info = await telegram(env, 'getWebhookInfo', {});
+  if (!info || typeof info.url !== 'string' || !info.url.startsWith('https://'))
+    throw Error('بوت تيليجرام ليس لديه Webhook HTTPS نشط.');
+  const previous = info.allowed_updates;
+  if (!Array.isArray(previous) || !previous.length ||
+      previous.includes('callback_query')) {
+    return {changed:false, enabled:true, errors:info.last_error_message || ''};
+  }
+  const updates = [...new Set([...previous, 'callback_query'])];
+  const payload = {
+    url: info.url, secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+    allowed_updates: updates, drop_pending_updates:false
+  };
+  if (Number.isInteger(info.max_connections) && info.max_connections >= 1 &&
+      info.max_connections <= 100) payload.max_connections = info.max_connections;
+  await telegram(env, 'setWebhook', payload);
+  const confirmed = await telegram(env, 'getWebhookInfo', {});
+  if (!Array.isArray(confirmed?.allowed_updates) ||
+      !confirmed.allowed_updates.includes('callback_query')) {
+    throw Error('لم يؤكد تيليجرام تفعيل استقبال ضغطات الأزرار.');
+  }
+  return {changed:true, enabled:true, errors:confirmed.last_error_message || ''};
+}
+async function ensureButtonsAndMenu(env, source) {
+  let message = '🎛️ لوحة بوت الريلز';
+  try {
+    const state = await ensureButtonWebhook(env);
+    message += state.changed ? '\\n✅ تم تفعيل استقبال الأزرار في Telegram.' :
+      '\\n✅ إعداد استقبال الأزرار مفعّل.';
+    if (state.errors) message += '\\n⚠️ آخر خطأ Webhook: ' + String(state.errors).slice(0, 120);
+  } catch (e) {
+    message += '\\n⚠️ تعذّر فحص Webhook: ' + String(e.message || e).slice(0, 130);
+  }
+  return showMenu(env, source, await readPlan(env), message);
 }
 async function fingerprint(value) {
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256',
@@ -177,8 +215,16 @@ async function retryOauth(env, source, plan) {
     await controls(env, source, plan));
 }
 async function handleCallback(env, cb) {
-  if (String(cb.message?.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return;
-  if (String(cb.from?.id) !== String(env.TELEGRAM_OWNER_ID || env.TELEGRAM_CHAT_ID)) return;
+  if (String(cb.message?.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) {
+    console.warn('Callback rejected: chat mismatch');
+    return;
+  }
+  if (String(cb.from?.id) !== String(env.TELEGRAM_OWNER_ID || env.TELEGRAM_CHAT_ID)) {
+    await telegram(env, 'answerCallbackQuery', {callback_query_id: cb.id,
+      text: 'الزر مخصص لمالك البوت فقط.', show_alert:true});
+    console.warn('Callback rejected: user mismatch');
+    return;
+  }
   await telegram(env, 'answerCallbackQuery', {callback_query_id: cb.id});
   const data = String(cb.data || '');
   const pieces = data.split(':');
@@ -360,7 +406,8 @@ async function processUpdate(env, update) {
   const key = `source:${env.TELEGRAM_CHAT_ID}`;
   const source = JSON.parse(await env.BOT_STATE.get(key) || '{}');
 
-  if (['/menu', '/help', '/start'].includes(cmd)) return showMenu(env, source, await readPlan(env));
+  if (['/menu', '/help', '/start', '/fixbuttons'].includes(cmd))
+    return ensureButtonsAndMenu(env, source);
   if (cmd === '/status') {
     const plan = await readPlan(env);
     return showMenu(env, source, plan, '📊 آخر مصدر: ' + (source.video_url || 'لا يوجد'));
