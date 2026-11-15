@@ -131,7 +131,7 @@ def _preview_keyboard(plan, chosen_ids):
     ref = _ui_fingerprint(plan)
     return {'inline_keyboard': [
         [{'text': '✅ اعتماد المقاطع ' + '، '.join(map(str, chosen_ids)),
-          'callback_data': f'p:approve:{ref}'}],
+          'callback_data': f'p:approve:{ref}:{os.getenv("GITHUB_RUN_ID", "")}'}],
         [{'text': '🎬 اختيار مقاطع أخرى', 'callback_data': f'p:menu:{ref}'}]
     ]}
 
