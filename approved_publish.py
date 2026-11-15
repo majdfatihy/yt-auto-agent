@@ -93,7 +93,7 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
         title, description = clip.get('reel_title'), clip.get('reel_description')
         if (not isinstance(title, str) or not 8 <= len(title) <= 100 or
                 not isinstance(description, str) or not description.strip() or
-                re.search(r'https?://|youtu\\.be|youtube\\.com', description, re.I)):
+                re.search(r'https?://|youtu\.be|youtube\.com', description, re.I)):
             raise RuntimeError('REEL_METADATA_NOT_PREVIEWED: prepare a new preview before publishing')
         metadata[clip_id] = (title, description)
     if not os.getenv('YT_CLIENT_ID') or not os.getenv('YT_CLIENT_SECRET') or not os.getenv('YT_REFRESH_TOKEN'):
