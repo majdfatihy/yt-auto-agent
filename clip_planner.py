@@ -328,7 +328,7 @@ def record_preview_result(expected_reference, clip_ids, run_id=None, clip_metada
         title, description = value.get('title'), value.get('description')
         if not isinstance(title, str) or not 8 <= len(title) <= 100 or not isinstance(description, str) or not description.strip():
             raise RuntimeError('REEL_METADATA_INVALID_FOR_PREVIEW')
-        if re.search(r'https?://|youtu\\.be|youtube\\.com', description, re.I):
+        if re.search(r'https?://|youtu\.be|youtube\.com', description, re.I):
             raise RuntimeError('REEL_METADATA_SOURCE_LINK_PROHIBITED')
         clip['reel_title'] = title
         clip['reel_description'] = description
