@@ -4,20 +4,6 @@
 const YT = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?[^\s]*v=|shorts\/|live\/)|youtu\.be\/)[^\s]+/i;
 const DRIVE = /^https:\/\/(?:www\.)?drive\.google\.com\/(?:file\/d\/[A-Za-z0-9_-]{15,}(?:\/|$)|(?:open|uc)\?id=[A-Za-z0-9_-]{15,}(?:&|$))/i;
 const MAX_MP4 = 20 * 1024 * 1024;
-const MENU = [
-  'لوحة وكيل يوتيوب — المرحلة الثانية',
-  'أرسل رابط يوتيوب أو رابط فيديو Google Drive أو MP4 مع رابطه لحفظه فقط.',
-  '/prepare — اقتراح مقاطع مرقمة فقط',
-  '1 أو 1,3 أو /clip 1,3 — معاينة المقاطع المختارة فقط',
-  '/seo — بيانات وصفية عند الطلب فقط',
-  '/approve 3 — اعتماد المقطع 3 بعد معاينته',
-  '/publish — نشر المعاينة المعتمدة فقط على يوتيوب (خاص)',
-  '/status — آخر مصدر',
-  '/cancel — إلغاء المصدر والاقتراحات',
-  '/menu — القائمة',
-  'لا يتم النشر دون /approve ثم /publish.'
-].join('\n');
-
 function getLink(m) {
   const candidates = (m.text || m.caption || '').match(/https?:\/\/[^\s<>]+/gi) || [];
   for (const raw of candidates) {
@@ -212,7 +198,6 @@ async function handleCallback(env, cb) {
           throw Error('عملية نشر قيد المتابعة. لا يمكن تغيير المصدر.');
         if (pieces[1] === 'prepare') {
           await clearPlan(env);
-          await setSelection(env, {created_utc: 'reset-' + source.video_url, clips: []}, []);
         }
         await dispatch(env, source, pieces[1]);
         return send(env, pieces[1] === 'prepare' ? '⏳ بدأ التحليل. ستصلك اقتراحات بأزرار.' :
