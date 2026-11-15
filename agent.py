@@ -318,10 +318,8 @@ def validate_gemini_data(data):
 # ==========================================
 def analyze_with_gemini(transcript_text, video_url):
     """تحليل النص وتوليد جميع عناصر السيو ومنشورات Quora عبر Gemini 3.1"""
-    if not GEMINI_KEY:
-        raise ValueError("مفتاح GEMINI_API_KEY غير موجود في GitHub Secrets!")
-
-    client = genai.Client(api_key=GEMINI_KEY)
+    if not GEMINI_KEY and not os.getenv("GROQ_API_KEY", "").strip():
+        raise ValueError("لا يوجد مفتاح لتوليد النص من Gemini أو Groq")
 
     prompt = f"""
     أنت خبير سيو يوتيوب ومونتاج. بناءً على بيانات/نص الفيديو التالي:
