@@ -38,6 +38,22 @@ jobs:
           deno --version
           ffmpeg -version | head -n 1
 
+      - name: Start localhost BgUtils PO Token server
+        run: |
+          docker run -d --init --name bgutil-provider \
+            -p 127.0.0.1:4416:4416 \
+            brainicism/bgutil-ytdlp-pot-provider:2.0.2
+          for attempt in $(seq 1 20); do
+            if curl --silent --show-error --max-time 2 http://127.0.0.1:4416/ >/dev/null 2>&1; then
+              echo "PO_TOKEN_PROVIDER_READY: YES"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PO_TOKEN_PROVIDER_READY: NO"
+          docker logs --tail 35 bgutil-provider
+          exit 1
+
       - name: Configure private yt-dlp network route
         env:
           YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
