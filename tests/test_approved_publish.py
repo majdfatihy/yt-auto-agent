@@ -77,12 +77,16 @@ class ApprovalTests(unittest.TestCase):
         def read():return deepcopy(current)
         def save(new): current.clear();current.update(deepcopy(new));states.append(current['status'])
         def upload(path,title,desc,tags):
-            uploaded.append((Path(path).read_bytes(),title))
+            uploaded.append((Path(path).read_bytes(),title,desc))
             return '✅ يوتيوب: تم النشر بنجاح! (https://youtu.be/mock)'
         with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
             results=publish_approved_clips(REF,'1',SOURCE,'abc',read,save,upload,
                 notifications.append,downloader=lambda *args:{1:DATA})
-        self.assertEqual(uploaded,[(DATA,'شرح ريلز تجريبي')]);self.assertEqual(current['status'],'published')
+        self.assertEqual(uploaded,[(DATA,'شرح ريلز تجريبي',
+                                    plan()['clips'][0]['reel_description'])])
+        self.assertIn('#ريلز', uploaded[0][2])
+        self.assertNotIn(SOURCE, uploaded[0][2])
+        self.assertEqual(current['status'],'published')
         self.assertIn('publishing',states);self.assertEqual(results[0]['clip_id'],1)
         with self.assertRaisesRegex(RuntimeError,'NOT_APPROVED'):
             publish_approved_clips(REF,'1',SOURCE,'abc',read,save,upload,notifications.append)
