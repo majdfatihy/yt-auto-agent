@@ -56,6 +56,7 @@ function button(label) {
   assert.ok(choice, 'Missing button '+label);
   return choice.callback_data;
 }
+plan=null;
 await msg('/menu');
 assert.ok(button('تحليل'));
 assert.ok(button('السيو'));
