@@ -83,6 +83,19 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
     if not isinstance(plan.get('approval_utc'), str) or not plan.get('approval_utc'):
         raise RuntimeError('PUBLISH_APPROVAL_MISSING')
     files = downloader(plan, expected_reference, ids)  # validate all before any upload
+    # Refuse legacy preview plans without verified, clip-specific metadata.
+    # Never make up a description or insert the original source URL.
+    metadata = {}
+    for clip_id in ids:
+        clip = next((c for c in plan['clips'] if c['id'] == clip_id), None)
+        if not clip:
+            raise RuntimeError('PUBLISH_CLIP_NOT_IN_PLAN')
+        title, description = clip.get('reel_title'), clip.get('reel_description')
+        if (not isinstance(title, str) or not 8 <= len(title) <= 100 or
+                not isinstance(description, str) or not description.strip() or
+                re.search(r'https?://|youtu\\.be|youtube\\.com', description, re.I)):
+            raise RuntimeError('REEL_METADATA_NOT_PREVIEWED: prepare a new preview before publishing')
+        metadata[clip_id] = (title, description)
     if not os.getenv('YT_CLIENT_ID') or not os.getenv('YT_CLIENT_SECRET') or not os.getenv('YT_REFRESH_TOKEN'):
         raise RuntimeError('YOUTUBE_OAUTH_MISSING: refuse to claim publication')
     # Reserve publication state: on a crash, never retry blindly and accidentally duplicate uploads.
@@ -99,9 +112,7 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
                     raise RuntimeError('PUBLISH_CLIP_NOT_IN_PLAN')
                 target = Path(temp) / f'clip-{clip_id}.mp4'
                 target.write_bytes(files[clip_id])
-                title = clip['title'][:100]
-                # Do not fabricate SEO or AI copy from title-only info.
-                desc = f"مقطع من الفيديو الأصلي: {video_url}"
+                title, desc = metadata[clip_id]
                 result = upload(str(target), title, desc, '')
                 if not isinstance(result, str) or not result.startswith('✅'):
                     # Google rejected the refresh token before the first upload request.
