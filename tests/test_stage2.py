@@ -63,7 +63,14 @@ class ClipChoicesTests(unittest.TestCase):
         plan = sample_plan()
         with patch('clip_planner.load_clip_plan', return_value=plan), \
              patch('clip_planner.save_clip_plan') as saved:
-            record_preview_result(plan_reference(plan), [1, 3], run_id='12345')
+            record_preview_result(
+                plan_reference(plan), [1, 3], run_id='12345',
+                clip_metadata={
+                    '1': {'title': 'كيفية تجربة الميزة الأولى في يوتيوب',
+                          'description': 'شرح أول ميزة\\nخطوات التنفيذ\\nأخطاء شائعة\\n#يوتيوب #شرح #شورتس'},
+                    '3': {'title': 'شرح طريقة تجربة الميزة الثالثة',
+                          'description': 'شرح ثالث ميزة\\nخطوات التنفيذ\\nالتجربة\\n#يوتيوب #شرح #شورتس'}
+                })
             result = saved.call_args.args[0]
             self.assertEqual(result['status'], 'previewed_awaiting_approval')
             self.assertEqual(result['previewed_ids'], [1, 3])
