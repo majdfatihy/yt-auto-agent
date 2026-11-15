@@ -12,6 +12,8 @@ from pathlib import Path
 import subprocess
 
 import requests
+from text_ai import generate_json
+from reel_title_quality import valid_title
 
 MIN_CLIP_SECONDS = 15
 MAX_CLIP_SECONDS = 59
@@ -87,6 +89,9 @@ def _validate(proposal, cues, duration):
             not _near_speech_boundary(cues, start, "start") or
             not _near_speech_boundary(cues, end, "end")):
         return None
+    spoken = " ".join(cue["text"] for cue in cues if cue["start"] < end and cue["end"] > start)
+    if not valid_title(title, spoken):
+        return None
     return {"title": title, "start_time": start, "end_time": end}
 
 
@@ -124,44 +129,41 @@ def _fallback(cues, duration, target_count):
 
 
 def _gemini_candidates(cues, duration, key):
-    if not key:
-        print("CLIP_PLANNER: GEMINI_API_KEY unavailable; grounded fallback")
-        return []
-    try:
-        from google import genai
-        client = genai.Client(api_key=key)
-    except Exception as error:
-        print(f"CLIP_PLANNER: SDK_ERROR: {type(error).__name__}")
-        return []
-    timed_text = "\n".join(f"[{cue['start']:.1f}-{cue['end']:.1f}] {cue['text']}" for cue in cues)[:19000]
+    """Get grounded suggestions from currently supported Gemini, then Groq backup."""
+    timed_text = "\n".join(
+        f"[{cue['start']:.1f}-{cue['end']:.1f}] {cue['text']}" for cue in cues)[:19000]
     prompt = (
-        "أنت محلل فيديو عربي. اقترح من 1 إلى 5 مقاطع مختلفة صالحة للشورتس، "
-        "بناءً فقط على الكلام المؤقت أدناه. لا تُنشئ فيديو ولا بيانات سيو ولا وصفًا ولا هاشتاجات. "
-        "العنوان لكل مقطع عربي قصير، موضوعي، يصف الكلام الموجود فعلًا من غير وعود أو ادعاءات. "
-        f"مدة كل اقتراح من {MIN_CLIP_SECONDS} إلى {MAX_CLIP_SECONDS} ثانية، "
-        f"وتوقيتاته بالثواني داخل المصدر من 0 إلى {duration:.1f}. "
-        "اربط البداية والنهاية بحدود الكلام المنطوق وتجنب القطع وسط الجمل. "
-        "قلل التداخل بين المقاطع قدر الإمكان، ولا تكرر الفكرة نفسها. "
-        "أرجع JSON فقط بالشكل: "
-        '{"proposals":[{"title":"عنوان من الكلام الفعلي","start_time":0,"end_time":30}]}. '
-        "إن لم يوجد مقطع مناسب أرجع مصفوفة فارغة.\n\n"
+        "أنت محرر شورتس عربي. اختر من 1 إلى 5 مقاطع تعليمية فعلية "
+        "من التفريغ المؤقت أدناه. العناوين للعرض الآن ولاحقًا للنشر ويجب أن تكون "
+        "عناوين بحثية واضحة تصف مشكلة محددة أو خطوة أو معلومة مكتملة، وتذكر "
+        "مصطلحًا موضوعيًا موجودًا حرفيًا في كلام المقطع. "
+        "لا تبدأ بتحية أو كلام عام أو ضمائر مبهمة، لا تنسخ أول 9 كلمات، "
+        "لا تستخدم (مقتطف، وبعد كده، اسمه، هنا بيقول، هتكمل)، "
+        "ولا تعد بشيء لم يرد في النص. قلل التداخل ولا تقطع منتصف الجمل. "
+        f"طول كل مقطع بين {MIN_CLIP_SECONDS} و{MAX_CLIP_SECONDS} ثانية "
+        f"داخل زمن المصدر 0 إلى {duration:.1f}. "
+        "النتيجة JSON فقط بالمفاتيح: "
+        '{"proposals":[{"title":"عنوان موضوعي واضح","start_time":0,"end_time":30}]}. '
+        "إن لم توجد مقاطع ذات فكرة واضحة أرجع proposals مصفوفة فارغة.\n\n"
         + timed_text
     )
-    models = [s.strip() for s in os.getenv("CLIP_PLANNER_MODELS", "gemini-3-flash-preview,gemini-2.5-flash").split(",") if s.strip()]
-    for model_name in models:
-        try:
-            response = client.models.generate_content(model=model_name, contents=prompt,
-                                                       config={"response_mime_type": "application/json"})
-            raw = json.loads(response.text)
-            options = raw.get("proposals") if isinstance(raw, dict) else None
-            if isinstance(options, list):
-                print(f"CLIP_PLANNER: GEMINI_MODEL: {model_name}; CANDIDATES: {len(options)}")
-                return options[:12]
-            print(f"CLIP_PLANNER: BAD_RESPONSE: {model_name}")
-        except Exception as error:
-            print(f"CLIP_PLANNER: GEMINI_ERROR: {model_name}: {type(error).__name__}: {str(error)[:130]}")
-    return []
+    def checked(payload):
+        options = payload.get("proposals") if isinstance(payload, dict) else None
+        if not isinstance(options, list):
+            raise ValueError("CLIP_AI_INVALID_PROPOSALS")
+        valid = [_validate(item, cues, duration) for item in options[:12]]
+        valid = [item for item in valid if item]
+        if not valid:
+            raise ValueError("CLIP_AI_NO_USABLE_SEO_TITLES")
+        return valid
 
+    try:
+        options, provider = generate_json(prompt, key, "CLIP_PLANNER_MODELS", checked)
+    except RuntimeError as error:
+        raise RuntimeError("CLIP_TITLES_UNAVAILABLE: تعذر إنشاء عناوين صحيحة. "
+                           "لن يتم استخدام مقدمات الكلام كعناوين. " + str(error)) from error
+    source = "groq" if provider.startswith("groq:") else "gemini"
+    return [{**item, "_ai_provider": source} for item in options]
 
 def build_clip_plan(video_url, telegram_file_id, timed_cues, duration, gemini_key):
     cues = _valid_cues(timed_cues)
@@ -177,21 +179,16 @@ def build_clip_plan(video_url, telegram_file_id, timed_cues, duration, gemini_ke
             suggestions.append(candidate)
         if len(suggestions) == desired:
             break
-    ai_count = len(suggestions)
-    if len(suggestions) < desired:
-        for candidate in _fallback(cues, duration, desired):
-            if not any(abs(candidate["start_time"] - old["start_time"]) < 9 for old in suggestions):
-                suggestions.append(candidate)
-            if len(suggestions) == desired:
-                break
+    # Never fill missing AI proposals with the first words of unrelated sentences.
     if not suggestions:
-        raise ValueError("لم يمكن اقتراح توقيتات معتمدة على الكلام الفعلي")
+        raise RuntimeError("CLIP_TITLES_UNAVAILABLE: لم ينتج تحليل الفيديو عناوين صالحة للمقاطع")
     suggestions = sorted(suggestions, key=lambda x: x["start_time"])
     clips = [{"id": index, **proposal} for index, proposal in enumerate(suggestions, 1)]
     plan = {"version": 1, "status": "awaiting_selection", "video_url": video_url,
             "telegram_file_id": telegram_file_id, "duration": round(duration, 1),
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "method": "gemini" if ai_count == len(clips) else ("mixed" if ai_count else "timed_transcript_fallback"),
+            "method": ("groq" if any(item.get("_ai_provider") == "groq"
+                                  for item in gemini_options) else "gemini"),
             "clips": clips}
     return plan
 
@@ -234,7 +231,7 @@ def format_clip_plan(plan):
         lines.append(f"{clip['id']}. {clip['title']}")
         lines.append(f"   {_stamp(clip['start_time'])} → {_stamp(clip['end_time'])} | {round(clip['end_time'] - clip['start_time'])} ثانية")
         lines.append("")
-    if plan["method"] != "gemini":
+    if plan["method"] == "timed_transcript_fallback":
         lines.append("ملاحظة: بعض العناوين مقتطفات حرفية من التفريغ لأن التحليل الذكي لم يوفر اقتراحات كافية.")
     lines.append("للمعاينة: أرسل رقمًا مثل 1 أو عدة أرقام مثل 1,3 أو /clip 1,3.")
     lines.append("لم يُقص أو يُنشر أي فيديو.")
