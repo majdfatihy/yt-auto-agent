@@ -18,11 +18,18 @@ class ReelMetadataTests(unittest.TestCase):
         self.assertNotIn('موضوع تاني', text)
 
     def test_ai_metadata_three_lines_with_hashtags(self):
-        response = {
+        payload = {
             'title': 'طريقة شحن كارت تلدا باستخدام إنستا باي',
-            'description': 'شرح شحن تلدا\\nاختيار البطاقة الإلكترونية\\nالتأكد من التحويل\\n#تلدا #شرح #شورتس'
+            'description_lines': [
+                'شرح خطوات شحن تلدا',
+                'اختيار البطاقة الإلكترونية',
+                'التأكد من التحويل'
+            ],
+            'hashtags': ['#تلدا', '#شرح', '#شورتس']
         }
-        with patch('reel_metadata.generate_json', return_value=(response, 'groq:openai/gpt-oss-120b')):
+        with patch('reel_metadata.generate_json', side_effect=
+                   lambda prompt, key, env, validator:
+                   (validator(payload), 'groq:openai/gpt-oss-120b')):
             result = generate_reel_metadata(
                 CUES, 0, 18, 'طريقة شحن تلدا من إنستا باي', '')
         self.assertEqual(result['method'], 'groq:openai/gpt-oss-120b')
