@@ -130,8 +130,21 @@ const LABELS = {
   auth_failed: 'فشل تفويض يوتيوب قبل الرفع، حدث OAuth ثم أعد المحاولة',
   published: 'تم تأكيد النشر'
 };
-async function showMenu(env, source, plan, title = '🎛️ لوحة بوت الريلز') {
-  return send(env, title + '\\n' +
+async function editOrSend(env, messageId, text, markup) {
+  if (Number.isInteger(messageId) && messageId > 0) {
+    try {
+      return await telegram(env, 'editMessageText', {
+        chat_id: env.TELEGRAM_CHAT_ID, message_id: messageId,
+        text, ...(markup ? {reply_markup: markup} : {})
+      });
+    } catch {
+      // An old message may not be editable; send a fresh usable menu.
+    }
+  }
+  return send(env, text, markup);
+}
+async function showMenu(env, source, plan, title = '🎛️ لوحة بوت الريلز', messageId = null) {
+  return editOrSend(env, messageId, title + '\n' +
     (source.video_url ? 'المصدر محفوظ. ' : 'أرسل رابط YouTube أو Google Drive للبدء. ') +
     (plan && sameSource(source, plan) ? (LABELS[plan.status] || 'الحالة: ' + plan.status) : ''),
     await controls(env, source, plan));
@@ -192,7 +205,7 @@ async function handleCallback(env, cb) {
       if (pieces[2] !== await sourceKey(source))
         throw Error('هذه أزرار مصدر قديم. افتح /menu.');
       if (pieces[1] === 'menu' || pieces[1] === 'status')
-        return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة');
+        return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة', cb.message?.message_id);
       if (pieces[1] === 'prepare' || pieces[1] === 'seo') {
         if (!source.video_url) throw Error('أرسل رابط فيديو أولًا.');
         if (['publish_queued', 'publishing'].includes(plan?.status))
@@ -224,7 +237,7 @@ async function handleCallback(env, cb) {
     if (!plan || pieces[2] !== await planKey(plan) || !sameSource(source, plan))
       throw Error('القائمة قديمة أو المصدر تغيّر. اطلب /menu.');
     if (pieces[1] === 'menu' || pieces[1] === 'status')
-      return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة');
+      return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة', cb.message?.message_id);
     if (pieces[1] === 'toggle') {
       if (!['awaiting_selection', 'previewed_awaiting_approval'].includes(plan.status))
         throw Error('هذه القائمة لم تعد متاحة للتحديد.');
@@ -234,7 +247,7 @@ async function handleCallback(env, cb) {
       const ids = await selection(env, plan);
       const changed = ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id].sort((a,b)=>a-b);
       await setSelection(env, plan, changed);
-      return showMenu(env, source, plan, 'اختياراتك: ' + (changed.join('، ') || 'لا يوجد'));
+      return showMenu(env, source, plan, 'اختياراتك: ' + (changed.join('، ') || 'لا يوجد'), cb.message?.message_id);
     }
     if (pieces[1] === 'preview') {
       const ids = await selection(env, plan);
@@ -257,11 +270,12 @@ async function handleCallback(env, cb) {
       plan.approved_ids = ids;
       plan.approval_utc = new Date().toISOString();
       await writePlan(env, plan);
-      return showMenu(env, source, plan, '✅ تم اعتماد المقاطع ' + ids.join('، ') + '. لم تُنشر.');
+      return showMenu(env, source, plan, '✅ تم اعتماد المقاطع ' + ids.join('، ') + '. لم تُنشر.', cb.message?.message_id);
     }
     if (pieces[1] === 'publish') {
       if (plan.status !== 'approved') throw Error('لا توجد معاينة معتمدة.');
-      return send(env, 'تأكيد نهائي: نشر المقاطع ' + plan.approved_ids.join('، ') +
+      return editOrSend(env, cb.message?.message_id,
+        'تأكيد نهائي: نشر المقاطع ' + plan.approved_ids.join('، ') +
         ' على يوتيوب بوضع خاص؟',
         inline([[{text:'نعم، انشر خاص',callback_data:'p:confirm:'+pieces[2]}],
                 [{text:'إلغاء القرار',callback_data:'p:menu:'+pieces[2]}]]));
@@ -269,7 +283,8 @@ async function handleCallback(env, cb) {
     if (pieces[1] === 'confirm') return publishPlan(env, source, plan);
     if (pieces[1] === 'retry') {
       if (!retriableAuthFailure(plan)) throw Error('هذه المعاينة لا تحتاج لإعادة تفويض.');
-      return send(env, 'تأكد من تحديث OAuth وأن الفيديو غير منشور. هل تعيد رفع نفس المعاينة الخاصة؟',
+      return editOrSend(env, cb.message?.message_id,
+        'تأكد من تحديث OAuth وأن الفيديو غير منشور. هل تعيد رفع نفس المعاينة الخاصة؟',
         inline([[{text:'نعم، أعد المحاولة',callback_data:'p:confirmretry:'+pieces[2]}],
                 [{text:'رجوع',callback_data:'p:menu:'+pieces[2]}]]));
     }
