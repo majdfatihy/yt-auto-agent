@@ -94,6 +94,34 @@ class ApprovalTests(unittest.TestCase):
                     lambda *_:self.fail('unexpected upload'),lambda _:None,downloader=lambda *a:{1:DATA})
         self.assertEqual(p['status'],'publish_queued')
 
+    def test_expired_refresh_token_allows_explicit_safe_retry(self):
+        current = plan()
+        def read(): return deepcopy(current)
+        def save(new): current.clear(); current.update(deepcopy(new))
+        with patch.dict(os.environ, {'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
+            with self.assertRaisesRegex(RuntimeError, 'invalid_grant'):
+                publish_approved_clips(REF,'1',SOURCE,'abc',read,save,
+                    lambda *_:"❌ يوتيوب خطأ: invalid_grant: Token has been expired or revoked.",
+                    lambda _:None,downloader=lambda *a:{1:DATA})
+        self.assertEqual(current['status'],'auth_failed')
+        self.assertEqual(current['auth_error_code'],'YOUTUBE_OAUTH_INVALID_GRANT')
+        self.assertNotIn('published_results',current)
+        with self.assertRaisesRegex(RuntimeError,'NOT_APPROVED'):
+            publish_approved_clips(REF,'1',SOURCE,'abc',read,save,
+                lambda *_:'✅ uploaded',lambda _:None,downloader=lambda *a:{1:DATA})
+
+    def test_non_oauth_upload_failure_remains_locked(self):
+        current = plan()
+        def read(): return deepcopy(current)
+        def save(new): current.clear(); current.update(deepcopy(new))
+        with patch.dict(os.environ, {'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
+            with self.assertRaisesRegex(RuntimeError, 'UPLOAD_UNCONFIRMED'):
+                publish_approved_clips(REF,'1',SOURCE,'abc',read,save,
+                    lambda *_:'❌ Network timeout: maybe uploaded',lambda _:None,
+                    downloader=lambda *a:{1:DATA})
+        self.assertEqual(current['status'],'publishing')
+        self.assertNotIn('auth_error_code',current)
+
     def test_failed_upload_stays_publishing_to_prevent_duplicates(self):
         current=plan()
         def save(new): current.clear(); current.update(deepcopy(new))

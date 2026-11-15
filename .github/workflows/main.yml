@@ -10,6 +10,11 @@ on:
         description: 'رابط فيديو اليوتيوب'
         required: true
 
+concurrency:
+  # Serialize actions for the same approval plan: a second /publish cannot race.
+  group: yt-agent-${{ github.event.client_payload.clip_plan_ref || github.event.client_payload.video_url || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   build_and_publish:
     runs-on: ubuntu-24.04

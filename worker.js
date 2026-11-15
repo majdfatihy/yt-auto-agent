@@ -1,23 +1,9 @@
-// Stage 2: Telegram webhook for yt-auto-agent. Publish stays disabled.
+// Telegram webhook: controlled preview, explicit approval and private YouTube publishing.
 // Cloudflare Secrets: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GITHUB_PAT, TELEGRAM_WEBHOOK_SECRET
 // Cloudflare Var: GITHUB_REPO (owner/repo); KV binding: BOT_STATE.
 const YT = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?[^\s]*v=|shorts\/|live\/)|youtu\.be\/)[^\s]+/i;
 const DRIVE = /^https:\/\/(?:www\.)?drive\.google\.com\/(?:file\/d\/[A-Za-z0-9_-]{15,}(?:\/|$)|(?:open|uc)\?id=[A-Za-z0-9_-]{15,}(?:&|$))/i;
 const MAX_MP4 = 20 * 1024 * 1024;
-const MENU = [
-  'لوحة وكيل يوتيوب — المرحلة الثانية',
-  'أرسل رابط يوتيوب أو رابط فيديو Google Drive أو MP4 مع رابطه لحفظه فقط.',
-  '/prepare — اقتراح مقاطع مرقمة فقط',
-  '1 أو 1,3 أو /clip 1,3 — معاينة المقاطع المختارة فقط',
-  '/seo — بيانات وصفية عند الطلب فقط',
-  '/approve 1 — اعتماد معاينة المقطع 1',
-  '/publish — نشر المعاينة المعتمدة فقط على يوتيوب (خاص)',
-  '/status — آخر مصدر',
-  '/cancel — إلغاء المصدر والاقتراحات',
-  '/menu — القائمة',
-  'لا يتم النشر دون /approve ثم /publish.'
-].join('\n');
-
 function getLink(m) {
   const candidates = (m.text || m.caption || '').match(/https?:\/\/[^\s<>]+/gi) || [];
   for (const raw of candidates) {
@@ -39,9 +25,260 @@ async function telegram(env, method, data) {
   if (!j.ok) throw Error('Telegram API error');
   return j.result;
 }
-async function send(env, text) {
-  await telegram(env, 'sendMessage', {chat_id: env.TELEGRAM_CHAT_ID, text});
+async function send(env, text, reply_markup = null) {
+  await telegram(env, 'sendMessage', {
+    chat_id: env.TELEGRAM_CHAT_ID, text,
+    ...(reply_markup ? {reply_markup} : {})
+  });
 }
+async function fingerprint(value) {
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256',
+    new TextEncoder().encode(String(value))));
+  return [...bytes.slice(0, 6)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+async function sourceKey(source) {
+  return fingerprint((source?.video_url || '') + '|' + (source?.telegram_file_id || ''));
+}
+async function planKey(plan) { return fingerprint(plan?.created_utc || ''); }
+function inline(rows) { return {inline_keyboard: rows}; }
+const clipDuration = clip => Math.round(clip.end_time - clip.start_time);
+function previewIds(plan) {
+  return Array.isArray(plan?.previewed_ids) ? plan.previewed_ids.filter(Number.isInteger) : [];
+}
+async function selection(env, plan) {
+  const key = 'selection:' + String(env.TELEGRAM_CHAT_ID) + ':' + await planKey(plan);
+  let ids = [];
+  try { ids = JSON.parse(await env.BOT_STATE.get(key) || '[]'); } catch {}
+  const allowed = new Set((plan.clips || []).map(clip => clip.id));
+  return Array.isArray(ids) ? ids.filter(id => Number.isInteger(id) && allowed.has(id)) : [];
+}
+async function setSelection(env, plan, ids) {
+  const key = 'selection:' + String(env.TELEGRAM_CHAT_ID) + ':' + await planKey(plan);
+  await env.BOT_STATE.put(key, JSON.stringify(ids), {expirationTtl: 1209600});
+}
+function legacyOauthFailure(plan) {
+  // The archived run 43767459446 failed at token refresh, before any upload.
+  return plan?.status === 'publishing' &&
+    plan.created_utc === '2026-11-15T21:37:01.857058+00:00' &&
+    plan.preview_run_id === '43766799372' &&
+    Array.isArray(plan.approved_ids) && plan.approved_ids.length === 1 &&
+    plan.approved_ids[0] === 3 && !(plan.published_results || []).length;
+}
+function retriableAuthFailure(plan) {
+  return (plan?.status === 'auth_failed' &&
+      plan.auth_error_code === 'YOUTUBE_OAUTH_INVALID_GRANT' &&
+      !(plan.published_results || []).length) || legacyOauthFailure(plan);
+}
+async function controls(env, source, plan) {
+  const srcHash = await sourceKey(source);
+  const basic = [];
+  if (source?.video_url) {
+    basic.push([{text: '🎬 تحليل واقتراح المقاطع', callback_data: 's:prepare:' + srcHash}]);
+    basic.push([{text: '📝 بيانات السيو', callback_data: 's:seo:' + srcHash},
+                {text: '📊 الحالة', callback_data: 's:status:' + srcHash}]);
+  }
+  if (!plan || !sameSource(source, plan) || !plan.clips?.length) {
+    basic.push([{text: '🏠 القائمة', callback_data: 's:menu:' + srcHash}]);
+    return inline(basic);
+  }
+  const hash = await planKey(plan);
+  const rows = [];
+  if (['awaiting_selection', 'previewed_awaiting_approval'].includes(plan.status)) {
+    const chosen = await selection(env, plan);
+    for (const clip of plan.clips) {
+      rows.push([{text: `${chosen.includes(clip.id) ? '✅' : '▫️'} ${clip.id}. ${clip.title.slice(0, 37)} · ${clipDuration(clip)}ث`,
+                  callback_data: `p:toggle:${hash}:${clip.id}`}]);
+    }
+    rows.push([{text: '🎞️ معاينة المقاطع المختارة (' + chosen.length + ')',
+                callback_data: 'p:preview:' + hash}]);
+    if (plan.status === 'previewed_awaiting_approval' && previewIds(plan).length) {
+      rows.push([{text: '✅ اعتماد المعاينة ' + previewIds(plan).join('،'),
+                  callback_data: 'p:approve:' + hash + ':' + plan.preview_run_id}]);
+    }
+  } else if (plan.status === 'approved') {
+    rows.push([{text: '🔒 تأكيد النشر الخاص', callback_data: 'p:publish:' + hash}]);
+  } else if (retriableAuthFailure(plan)) {
+    rows.push([{text: '🔑 إعادة المحاولة بعد تحديث OAuth', callback_data: 'p:retry:' + hash}]);
+  }
+  rows.push([{text: '📊 تحديث الحالة', callback_data: 'p:status:' + hash},
+             {text: '🏠 القائمة', callback_data: 'p:menu:' + hash}]);
+  if (!['publish_queued', 'publishing', 'published'].includes(plan.status)) {
+    rows.push([{text: '❌ إلغاء المصدر', callback_data: 's:cancel:' + srcHash}]);
+  }
+  return inline(rows);
+}
+const LABELS = {
+  awaiting_selection: 'اختر المقاطع ثم اضغط معاينة',
+  previewed_awaiting_approval: 'المعاينة جاهزة — اختار اعتماد المقطع الصحيح',
+  approved: 'معتمد، ولم يُنشر بعد',
+  publish_queued: 'طلب النشر قيد التنفيذ',
+  publishing: 'النشر قيد التنفيذ أو بحاجة لمراجعة نتيجة آخر تشغيل',
+  auth_failed: 'فشل تفويض يوتيوب قبل الرفع، حدث OAuth ثم أعد المحاولة',
+  published: 'تم تأكيد النشر'
+};
+async function editOrSend(env, messageId, text, markup) {
+  if (Number.isInteger(messageId) && messageId > 0) {
+    try {
+      return await telegram(env, 'editMessageText', {
+        chat_id: env.TELEGRAM_CHAT_ID, message_id: messageId,
+        text, ...(markup ? {reply_markup: markup} : {})
+      });
+    } catch {
+      // An old message may not be editable; send a fresh usable menu.
+    }
+  }
+  return send(env, text, markup);
+}
+async function showMenu(env, source, plan, title = '🎛️ لوحة بوت الريلز', messageId = null) {
+  return editOrSend(env, messageId, title + '\n' +
+    (source.video_url ? 'المصدر محفوظ. ' : 'أرسل رابط YouTube أو Google Drive للبدء. ') +
+    (plan && sameSource(source, plan) ? (LABELS[plan.status] || 'الحالة: ' + plan.status) : ''),
+    await controls(env, source, plan));
+}
+async function publishPlan(env, source, plan) {
+  if (!plan || plan.status !== 'approved' || !Array.isArray(plan.approved_ids) ||
+      !plan.approved_ids.length || !plan.approval_utc)
+    throw Error('النشر غير مسموح: اعتمد معاينة أولًا.');
+  if (!sameSource(source, plan)) throw Error('المعاينة المعتمدة تخص مصدرًا آخر.');
+  await requirePreviewArtifact(env, plan);
+  plan.status = 'publish_queued';
+  await writePlan(env, plan);
+  try {
+    await dispatch(env, plan, 'publish', {clip_ids: plan.approved_ids.join(','),
+      clip_plan_ref: plan.created_utc});
+  } catch (err) {
+    plan.status = 'approved';
+    await writePlan(env, plan);
+    throw err;
+  }
+  return send(env, 'تم طلب نشر المقاطع: ' + plan.approved_ids.join(', ') +
+    ' بوضع خاص فقط. النشر لم يكتمل بعد.', await controls(env, source, plan));
+}
+async function retryOauth(env, source, plan) {
+  if (!sameSource(source, plan) || !retriableAuthFailure(plan) ||
+      !Array.isArray(plan.approved_ids) || !plan.approved_ids.length ||
+      !plan.approval_utc) throw Error('إعادة المحاولة غير مسموحة لهذه الحالة.');
+  await requirePreviewArtifact(env, plan);
+  plan.status = 'publish_queued';
+  plan.auth_error_code = '';
+  plan.retry_count = (plan.retry_count || 0) + 1;
+  if (plan.retry_count > 3) throw Error('بلغت حد المحاولات. راجع الربط يدويًا.');
+  await writePlan(env, plan);
+  try {
+    await dispatch(env, plan, 'publish', {clip_ids: plan.approved_ids.join(','),
+      clip_plan_ref: plan.created_utc});
+  } catch (err) {
+    plan.status = 'auth_failed';
+    plan.auth_error_code = 'YOUTUBE_OAUTH_INVALID_GRANT';
+    await writePlan(env, plan);
+    throw err;
+  }
+  return send(env, 'أُرسل طلب إعادة نشر نفس المعاينة المعتمدة بوضع خاص. جاري التحقق.',
+    await controls(env, source, plan));
+}
+async function handleCallback(env, cb) {
+  if (String(cb.message?.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return;
+  if (String(cb.from?.id) !== String(env.TELEGRAM_OWNER_ID || env.TELEGRAM_CHAT_ID)) return;
+  await telegram(env, 'answerCallbackQuery', {callback_query_id: cb.id});
+  const data = String(cb.data || '');
+  const pieces = data.split(':');
+  if (pieces.length < 3 || !['p', 's'].includes(pieces[0])) return;
+  const key = `source:${env.TELEGRAM_CHAT_ID}`;
+  const source = JSON.parse(await env.BOT_STATE.get(key) || '{}');
+  const plan = await readPlan(env);
+  try {
+    if (pieces[0] === 's') {
+      if (pieces[2] !== await sourceKey(source))
+        throw Error('هذه أزرار مصدر قديم. افتح /menu.');
+      if (pieces[1] === 'menu' || pieces[1] === 'status')
+        return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة', cb.message?.message_id);
+      if (pieces[1] === 'prepare' || pieces[1] === 'seo') {
+        if (!source.video_url) throw Error('أرسل رابط فيديو أولًا.');
+        if (['publish_queued', 'publishing'].includes(plan?.status))
+          throw Error('عملية نشر قيد المتابعة. لا يمكن تغيير المصدر.');
+        if (pieces[1] === 'prepare') {
+          await clearPlan(env);
+        }
+        await dispatch(env, source, pieces[1]);
+        return send(env, pieces[1] === 'prepare' ? '⏳ بدأ التحليل. ستصلك اقتراحات بأزرار.' :
+          '⏳ بدأت معالجة بيانات السيو.', await controls(env, source, null));
+      }
+      if (pieces[1] === 'cancel') {
+        if (['publish_queued', 'publishing'].includes(plan?.status))
+          throw Error('النشر جارٍ أو يحتاج مراجعة؛ الإلغاء غير متاح.');
+        return send(env, 'هل تريد حذف المصدر والاقتراحات؟',
+          inline([[{text:'نعم، إلغاء',callback_data:'s:confirmcancel:'+pieces[2]}],
+                  [{text:'رجوع',callback_data:'s:menu:'+pieces[2]}]]));
+      }
+      if (pieces[1] === 'confirmcancel') {
+        if (['publish_queued', 'publishing'].includes(plan?.status))
+          throw Error('النشر قيد التنفيذ، لا يمكن الإلغاء.');
+        await clearPlan(env);
+        await env.BOT_STATE.put(key, '{}');
+        return showMenu(env, {}, null, 'تم إلغاء المصدر والاقتراحات.');
+      }
+      return;
+    }
+    if (!plan || pieces[2] !== await planKey(plan) || !sameSource(source, plan))
+      throw Error('القائمة قديمة أو المصدر تغيّر. اطلب /menu.');
+    if (pieces[1] === 'menu' || pieces[1] === 'status')
+      return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة', cb.message?.message_id);
+    if (pieces[1] === 'toggle') {
+      if (!['awaiting_selection', 'previewed_awaiting_approval'].includes(plan.status))
+        throw Error('هذه القائمة لم تعد متاحة للتحديد.');
+      const id = Number(pieces[3]);
+      if (!Number.isInteger(id) || !plan.clips.some(c => c.id === id))
+        throw Error('رقم مقطع غير صالح.');
+      const ids = await selection(env, plan);
+      const changed = ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id].sort((a,b)=>a-b);
+      await setSelection(env, plan, changed);
+      return showMenu(env, source, plan, 'اختياراتك: ' + (changed.join('، ') || 'لا يوجد'), cb.message?.message_id);
+    }
+    if (pieces[1] === 'preview') {
+      const ids = await selection(env, plan);
+      if (!ids.length) throw Error('اختار مقطعًا واحدًا على الأقل من الأزرار.');
+      parseChoices(ids.join(','), plan);
+      await dispatch(env, plan, 'preview',
+        {clip_ids: ids.join(','), clip_plan_ref: plan.created_utc});
+      return send(env, '⏳ بدأت معاينة: ' + ids.join('، ') + '. بدون نشر.');
+    }
+    if (pieces[1] === 'approve') {
+      if (plan.status !== 'previewed_awaiting_approval' || !previewIds(plan).length)
+        throw Error('لا توجد معاينة جاهزة للاعتماد.');
+      if (pieces[3] !== String(plan.preview_run_id))
+        throw Error('زر اعتماد قديم. افتح القائمة لمعاينة أحدث إصدار.');
+      const ids = previewIds(plan);
+      if (!ids.every(id => plan.clips.some(c => c.id === id)))
+        throw Error('المعاينة لا تطابق المقاطع الحالية.');
+      await requirePreviewArtifact(env, plan);
+      plan.status = 'approved';
+      plan.approved_ids = ids;
+      plan.approval_utc = new Date().toISOString();
+      await writePlan(env, plan);
+      return showMenu(env, source, plan, '✅ تم اعتماد المقاطع ' + ids.join('، ') + '. لم تُنشر.', cb.message?.message_id);
+    }
+    if (pieces[1] === 'publish') {
+      if (plan.status !== 'approved') throw Error('لا توجد معاينة معتمدة.');
+      return editOrSend(env, cb.message?.message_id,
+        'تأكيد نهائي: نشر المقاطع ' + plan.approved_ids.join('، ') +
+        ' على يوتيوب بوضع خاص؟',
+        inline([[{text:'نعم، انشر خاص',callback_data:'p:confirm:'+pieces[2]}],
+                [{text:'إلغاء القرار',callback_data:'p:menu:'+pieces[2]}]]));
+    }
+    if (pieces[1] === 'confirm') return publishPlan(env, source, plan);
+    if (pieces[1] === 'retry') {
+      if (!retriableAuthFailure(plan)) throw Error('هذه المعاينة لا تحتاج لإعادة تفويض.');
+      return editOrSend(env, cb.message?.message_id,
+        'تأكد من تحديث OAuth وأن الفيديو غير منشور. هل تعيد رفع نفس المعاينة الخاصة؟',
+        inline([[{text:'نعم، أعد المحاولة',callback_data:'p:confirmretry:'+pieces[2]}],
+                [{text:'رجوع',callback_data:'p:menu:'+pieces[2]}]]));
+    }
+    if (pieces[1] === 'confirmretry') return retryOauth(env, source, plan);
+  } catch (err) {
+    return send(env, '⚠️ ' + String(err.message || err).slice(0, 250));
+  }
+}
+
 async function github(env, pathname, method = 'GET', data) {
   const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}${pathname}`, {
     method,
@@ -112,6 +349,7 @@ async function dispatch(env, source, action, extra = {}) {
   if (r.status !== 204) throw Error(`GitHub dispatch HTTP ${r.status}`);
 }
 async function processUpdate(env, update) {
+  if (update.callback_query) return handleCallback(env, update.callback_query);
   const m = update.edited_message || update.message;
   if (!m || String(m.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return;
   const text = (m.text || '').trim();
@@ -122,11 +360,10 @@ async function processUpdate(env, update) {
   const key = `source:${env.TELEGRAM_CHAT_ID}`;
   const source = JSON.parse(await env.BOT_STATE.get(key) || '{}');
 
-  if (['/menu', '/help', '/start'].includes(cmd)) return send(env, MENU);
+  if (['/menu', '/help', '/start'].includes(cmd)) return showMenu(env, source, await readPlan(env));
   if (cmd === '/status') {
     const plan = await readPlan(env);
-    return send(env, 'آخر مصدر محفوظ: ' + (source.video_url || 'لا يوجد') +
-      '\nحالة المعالجة: ' + (plan?.status || 'لا توجد معاينة'));
+    return showMenu(env, source, plan, '📊 آخر مصدر: ' + (source.video_url || 'لا يوجد'));
   }
   if (cmd === '/cancel') {
     const existing = await readPlan(env);
@@ -151,30 +388,16 @@ async function processUpdate(env, update) {
       plan.approval_utc = new Date().toISOString();
       plan.status = 'approved';
       await writePlan(env, plan);
-      return send(env, 'تم اعتماد المقاطع ' + ids.join(', ') + '. للنشر أرسل /publish.');
+      return showMenu(env, source, plan, '✅ تم اعتماد المقاطع ' + ids.join('، ') + '.');
     } catch (e) { return send(env, String(e.message || e)); }
   }
   if (cmd === '/publish') {
-    try {
-      const plan = await readPlan(env);
-      if (!plan || plan.status !== 'approved' || !Array.isArray(plan.approved_ids) ||
-          !plan.approved_ids.length || !plan.approval_utc)
-        throw Error('النشر غير مسموح. يجب إرسال /approve 1 بعد المعاينة أولًا.');
-      if (!sameSource(source, plan)) throw Error('المعاينة المعتمدة تخص مصدرًا آخر.');
-      await requirePreviewArtifact(env, plan);
-      plan.status = 'publish_queued';
-      await writePlan(env, plan);
-      try {
-        await dispatch(env, plan, 'publish', {clip_ids: plan.approved_ids.join(','),
-          clip_plan_ref: plan.created_utc});
-      } catch (err) {
-        plan.status = 'approved';
-        await writePlan(env, plan);
-        throw err;
-      }
-      return send(env, 'تم إرسال طلب نشر المقاطع المعتمدة فقط: ' +
-        plan.approved_ids.join(', ') + '. سيتم الرفع كفيديو خاص.');
-    } catch (e) { return send(env, String(e.message || e)); }
+    try { return await publishPlan(env, source, await readPlan(env)); }
+    catch (e) { return send(env, String(e.message || e)); }
+  }
+  if (cmd === '/retry') {
+    try { return await retryOauth(env, source, await readPlan(env)); }
+    catch (e) { return send(env, String(e.message || e)); }
   }
 
   if (cmd === '/clip' || /^[0-9٠-٩۰-۹]+(?:[\s,،.]+[0-9٠-٩۰-۹]+)*$/.test(text)) {
@@ -216,10 +439,10 @@ async function processUpdate(env, update) {
     await clearPlan(env);
     await env.BOT_STATE.put(key, JSON.stringify(
       {video_url: link, telegram_file_id: media?.file_id || ''}));
-    return send(env, 'تم حفظ المصدر فقط. استخدم /prepare لاقتراح التوقيتات.');
+    return showMenu(env, {video_url: link, telegram_file_id: media?.file_id || ''}, null, '✅ تم حفظ المصدر، بدون تحليل أو نشر.');
   }
   if (media) return send(env, 'وصل MP4 بدون رابط. أضف رابط يوتيوب في تعليق الملف أو رد عليه بالرابط.');
-  if (text) return send(env, 'الأمر غير معروف. أرسل /menu.');
+  if (text) return showMenu(env, source, await readPlan(env), 'الأمر غير معروف؛ استخدم الأزرار.');
 }
 export default {
   async fetch(request, env) {
