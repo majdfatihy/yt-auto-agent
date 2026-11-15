@@ -171,15 +171,24 @@ def _existing_media(
     )[0]
 
 
-def _download_profiles(cookies_file):
-    """Default extraction, then public client fallback.
+_FALLBACK_ERRORS = {
+    'YOUTUBE_AUTH_REQUIRED',
+    'YOUTUBE_ACCESS_RESTRICTED',
+    'YOUTUBE_FORMAT_UNAVAILABLE',
+}
 
-    No account cookies are sent with alternate clients.
-    IP blocks may still require a separate network route.
+
+def _download_profiles(cookies_file):
+    """Try independent public YouTube player clients after the default.
+
+    Alternate clients receive no account cookies. A network-level/IP block
+    cannot be solved by merely changing the player client.
     """
     return (
         (cookies_file, None),
-        (None, 'android_vr,web_embedded'),
+        (None, 'android_vr'),
+        (None, 'web_embedded'),
+        (None, 'web_safari'),
     )
 
 
@@ -202,7 +211,8 @@ def download_youtube_audio(
 
     last_error = None
 
-    for cookies, clients in _download_profiles(cookies_file):
+    profiles = _download_profiles(cookies_file)
+    for index, (cookies, clients) in enumerate(profiles):
         cmd = _base_command(
             cookies,
             player_clients=clients,
@@ -221,19 +231,11 @@ def download_youtube_audio(
 
         except YouTubeSourceError as exc:
             last_error = exc
-
-            if (
-                str(exc) not in (
-                    'YOUTUBE_AUTH_REQUIRED',
-                    'YOUTUBE_ACCESS_RESTRICTED',
-                )
-                or clients
-            ):
+            if str(exc) not in _FALLBACK_ERRORS or index + 1 == len(profiles):
                 raise
-
             print(
-                'YOUTUBE_DOWNLOAD: DEFAULT_CLIENT_BLOCKED; '
-                'TRYING_PUBLIC_CLIENTS'
+                'YOUTUBE_DOWNLOAD: AUDIO_PROFILE_FAILED: '
+                + str(exc) + '; TRYING_NEXT_PUBLIC_CLIENT'
             )
 
     raise last_error or YouTubeSourceError(
@@ -275,8 +277,9 @@ def download_youtube_video(
 
     last_error = None
 
-    for cookies, clients in _download_profiles(cookies_file):
-        for index, fmt in enumerate(formats):
+    profiles = _download_profiles(cookies_file)
+    for profile_index, (cookies, clients) in enumerate(profiles):
+        for format_index, fmt in enumerate(formats):
             cmd = _base_command(
                 cookies,
                 player_clients=clients,
@@ -296,27 +299,15 @@ def download_youtube_video(
 
             except YouTubeSourceError as exc:
                 last_error = exc
-
-                if (
-                    str(exc) == 'YOUTUBE_FORMAT_UNAVAILABLE'
-                    and index + 1 < len(formats)
-                ):
+                if str(exc) == 'YOUTUBE_FORMAT_UNAVAILABLE' and format_index + 1 < len(formats):
                     continue
-
-                if (
-                    str(exc) in (
-                        'YOUTUBE_AUTH_REQUIRED',
-                        'YOUTUBE_ACCESS_RESTRICTED',
-                    )
-                    and not clients
-                ):
-                    print(
-                        'YOUTUBE_DOWNLOAD: DEFAULT_CLIENT_BLOCKED; '
-                        'TRYING_PUBLIC_CLIENTS'
-                    )
-                    break
-
-                raise
+                if str(exc) not in _FALLBACK_ERRORS or profile_index + 1 == len(profiles):
+                    raise
+                print(
+                    'YOUTUBE_DOWNLOAD: VIDEO_PROFILE_FAILED: '
+                    + str(exc) + '; TRYING_NEXT_PUBLIC_CLIENT'
+                )
+                break
 
     raise last_error or YouTubeSourceError(
         'YOUTUBE_DOWNLOAD_FAILED'
