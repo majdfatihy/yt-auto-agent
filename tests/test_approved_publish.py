@@ -20,7 +20,12 @@ def plan():
     return dict(status='publish_queued', created_utc=REF, video_url=SOURCE,
                 telegram_file_id='abc', preview_run_id='12345', previewed_ids=[1],
                 approved_ids=[1], approval_utc='2026-11-06T08:00:00Z',
-                clips=[dict(id=1, title='Clip One', start_time=0, end_time=30)])
+                clips=[dict(id=1, title='Clip One', start_time=0, end_time=30,
+                            reel_title='شرح ريلز تجريبي',
+                            reel_description='شرح المقطع من التفريغ\
+تفاصيل حقيقية\
+خطوات مسموعة\
+#ريلز #شرح #فيديو')])
 
 def archive_bytes(bad_sha=False):
     manifest=dict(plan_ref=REF, video_url=SOURCE, telegram_file_id='abc',
@@ -80,11 +85,29 @@ class ApprovalTests(unittest.TestCase):
         with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
             results=publish_approved_clips(REF,'1',SOURCE,'abc',read,save,upload,
                 notifications.append,downloader=lambda *args:{1:DATA})
-        self.assertEqual(uploaded,[(DATA,'Clip One')]);self.assertEqual(current['status'],'published')
+        self.assertEqual(uploaded,[(DATA,'شرح ريلز تجريبي')]);self.assertEqual(current['status'],'published')
         self.assertIn('publishing',states);self.assertEqual(results[0]['clip_id'],1)
         with self.assertRaisesRegex(RuntimeError,'NOT_APPROVED'):
             publish_approved_clips(REF,'1',SOURCE,'abc',read,save,upload,notifications.append)
         self.assertEqual(len(uploaded),1)
+
+    def test_reject_missing_clip_metadata_before_upload(self):
+        p=plan(); del p['clips'][0]['reel_title']
+        events=[]
+        with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
+            with self.assertRaisesRegex(RuntimeError,'REEL_METADATA_NOT_PREVIEWED'):
+                publish_approved_clips(REF,'1',SOURCE,'abc',lambda:p,lambda _:events.append('save'),
+                    lambda *_:events.append('upload'),lambda _:None,downloader=lambda *a:{1:DATA})
+        self.assertFalse(events)
+        self.assertEqual(p['status'],'publish_queued')
+
+    def test_reject_source_link_in_description(self):
+        p=plan();p['clips'][0]['reel_description']='رابط الفيديو https://youtu.be/abcdefgh'
+        with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
+            with self.assertRaisesRegex(RuntimeError,'REEL_METADATA_NOT_PREVIEWED'):
+                publish_approved_clips(REF,'1',SOURCE,'abc',lambda:p,lambda _:None,
+                    lambda *_:self.fail('unexpected upload'),lambda _:None,
+                    downloader=lambda *a:{1:DATA})
 
     def test_missing_credentials_does_not_reserve_or_upload(self):
         p=plan()
