@@ -108,7 +108,35 @@ def fetch_drive_source():
     os.environ["SOURCE_VIDEO_FILE"] = str(path.resolve())
 
 
-def send_telegram(msg):
+def _ui_fingerprint(plan):
+    """Same short plan identity used by the Cloudflare callback handler."""
+    return hashlib.sha256(plan_reference(plan).encode('utf-8')).hexdigest()[:12]
+
+
+def _proposals_keyboard(plan):
+    ref = _ui_fingerprint(plan)
+    rows = []
+    for clip in plan['clips']:
+        duration = round(clip['end_time'] - clip['start_time'])
+        rows.append([{'text': f"▫️ {clip['id']}. {clip['title'][:37]} · {duration}ث",
+                      'callback_data': f"p:toggle:{ref}:{clip['id']}"}])
+    rows.append([{'text': '🎞️ معاينة المقاطع المختارة',
+                  'callback_data': f'p:preview:{ref}'}])
+    rows.append([{'text': '📊 الحالة', 'callback_data': f'p:status:{ref}'},
+                 {'text': '🏠 القائمة', 'callback_data': f'p:menu:{ref}'}])
+    return {'inline_keyboard': rows}
+
+
+def _preview_keyboard(plan, chosen_ids):
+    ref = _ui_fingerprint(plan)
+    return {'inline_keyboard': [
+        [{'text': '✅ اعتماد المقاطع ' + '، '.join(map(str, chosen_ids)),
+          'callback_data': f'p:approve:{ref}'}],
+        [{'text': '🎬 اختيار مقاطع أخرى', 'callback_data': f'p:menu:{ref}'}]
+    ]}
+
+
+def send_telegram(msg, reply_markup=None):
     """إرسال رسالة نصية إلى تيليجرام مع طباعتها في سجل GitHub"""
     print(msg)
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -116,7 +144,10 @@ def send_telegram(msg):
         return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     for i in range(0, len(msg), 4000):
-        response = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg[i:i+4000]}, timeout=15)
+        payload = {"chat_id": TG_CHAT_ID, "text": msg[i:i+4000]}
+        if reply_markup and i + 4000 >= len(msg):
+            payload["reply_markup"] = reply_markup
+        response = requests.post(url, json=payload, timeout=15)
         response.raise_for_status()
         if not response.json().get("ok"):
             raise RuntimeError("Telegram refused sendMessage")
@@ -508,8 +539,9 @@ if __name__ == "__main__":
             (preview_dir / 'manifest.json').write_text(
                 json.dumps(preview_manifest, ensure_ascii=False), encoding='utf-8')
             record_preview_result(expected_ref, chosen_ids, preview_manifest['preview_run_id'])
-            send_telegram('اكتملت المعاينة للمقاطع: ' + ', '.join(map(str, chosen_ids)) +
-                          '. لم يُنشر أي فيديو. للموافقة أرسل /approve 1 ثم /publish.')
+            send_telegram('✅ اكتملت معاينة المقاطع ' + '، '.join(map(str, chosen_ids)) +
+                          '. راجع الفيديوهات، ثم استخدم زر الاعتماد. لم يتم النشر.',
+                          reply_markup=_preview_keyboard(plan, chosen_ids))
             raise SystemExit(0)
 
         send_telegram(f"⏳ بدأ الوكيل مهمة {AGENT_ACTION} للفيديو:\n{VIDEO_URL}")
@@ -541,7 +573,13 @@ if __name__ == "__main__":
             duration = source_duration(local_source or None, timed_cues)
             plan = build_clip_plan(VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, GEMINI_KEY)
             save_clip_plan(plan)
-            send_telegram(format_clip_plan(plan))
+            summary = '✅ اقتراحات المقاطع جاهزة. اختار من الأزرار ثم اطلب المعاينة.\\n'
+            summary += '\\n'.join(
+                f"{clip['id']}. {clip['title']} ({round(clip['start_time'])}–{round(clip['end_time'])}ث)"
+                for clip in plan['clips'])
+            if plan.get('method') != 'gemini':
+                summary += '\\nبعض العناوين مقتطفات حرفية من التفريغ.'
+            send_telegram(summary, reply_markup=_proposals_keyboard(plan))
             raise SystemExit(0)
 
         # /seo is the only command that requests descriptive metadata.
