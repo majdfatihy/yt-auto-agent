@@ -185,6 +185,7 @@ def _download_profiles(cookies_file):
     cannot be solved by merely changing the player client.
     """
     return (
+        (None, 'mweb'),
         (cookies_file, None),
         (None, 'android_vr'),
         (None, 'web_embedded'),
