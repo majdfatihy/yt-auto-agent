@@ -22,10 +22,7 @@ def plan():
                 approved_ids=[1], approval_utc='2026-11-06T08:00:00Z',
                 clips=[dict(id=1, title='Clip One', start_time=0, end_time=30,
                             reel_title='شرح ريلز تجريبي',
-                            reel_description='شرح المقطع من التفريغ\
-تفاصيل حقيقية\
-خطوات مسموعة\
-#ريلز #شرح #فيديو')])
+                            reel_description='شرح المقطع من التفريغ\\nتفاصيل حقيقية\\nخطوات مسموعة\\n#ريلز #شرح #فيديو')])
 
 def archive_bytes(bad_sha=False):
     manifest=dict(plan_ref=REF, video_url=SOURCE, telegram_file_id='abc',
