@@ -44,10 +44,10 @@ async function hook(payload) {
 }
 async function msg(text) {await hook({message:{chat:{id:999},text}});}
 async function press(data,owner=999) {
-  await hook({callback_query:{id:'cb-'+index,from:{id:owner},data,message:{chat:{id:999}}}});
+  await hook({callback_query:{id:'cb-'+index,from:{id:owner},data,message:{chat:{id:999},message_id:555}}});
 }
 function lastMarkup() {
-  const latest=sent.filter(e=>e.method==='sendMessage').at(-1)?.data;
+  const latest=sent.filter(e=>['sendMessage','editMessageText'].includes(e.method)).at(-1)?.data;
   assert.ok(latest?.reply_markup?.inline_keyboard,'expected button markup');
   return latest.reply_markup.inline_keyboard.flat();
 }
@@ -70,8 +70,11 @@ assert.equal(dispatched.length,1);
 plan=structuredClone(initial);
 await msg('/menu');
 let toggle3=button('3.');
+const messagesBeforeToggle=sent.filter(x=>x.method==='sendMessage').length;
 await press(toggle3);
-assert.match(sent.filter(x=>x.method==='sendMessage').at(-1).data.text,/3/);
+assert.match(sent.filter(x=>['sendMessage','editMessageText'].includes(x.method)).at(-1).data.text,/3/);
+assert.equal(sent.filter(x=>x.method==='sendMessage').length,messagesBeforeToggle,
+  'clip toggles should edit the existing menu, not spam new messages');
 assert.ok(button('✅ 3.'));
 let preview=button('معاينة');
 await press(preview);
@@ -92,6 +95,8 @@ plan.previewed_ids=[3];
 plan.preview_run_id='13579';
 await msg('/menu');
 const approve=button('اعتماد المعاينة');
+await press(approve.replace(':13579', ':99999'));
+assert.equal(plan.status,'previewed_awaiting_approval','old preview callback must not approve');
 await press(approve,111);
 assert.equal(plan.status,'previewed_awaiting_approval');
 await press(approve);
