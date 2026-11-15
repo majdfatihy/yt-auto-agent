@@ -4,6 +4,7 @@ GitHub artifact is validated against approved plan identity and SHA256 manifest.
 """
 from __future__ import annotations
 import hashlib
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -103,6 +104,15 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
                 desc = f"مقطع من الفيديو الأصلي: {video_url}"
                 result = upload(str(target), title, desc, '')
                 if not isinstance(result, str) or not result.startswith('✅'):
+                    # Google rejected the refresh token before the first upload request.
+                    # This exact failure is known to be pre-upload; other failures remain
+                    # locked as 'publishing' to avoid duplicate YouTube videos.
+                    if (isinstance(result, str) and 'invalid_grant' in result.lower()
+                            and not completed):
+                        plan['status'] = 'auth_failed'
+                        plan['auth_error_code'] = 'YOUTUBE_OAUTH_INVALID_GRANT'
+                        plan['auth_failed_utc'] = datetime.now(timezone.utc).isoformat()
+                        save_plan(plan)
                     raise RuntimeError(f'YOUTUBE_UPLOAD_UNCONFIRMED: {result}')
                 completed.append({'clip_id': clip_id, 'result': result})
                 plan['published_results'] = completed
@@ -112,6 +122,7 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
         save_plan(plan)
         notify('تم نشر المقاطع المعتمدة فقط: ' + ', '.join(map(str, ids)))
     except Exception:
-        # Deliberately keep 'publishing' to prevent replays after ambiguous upload failures.
+        # Preserve 'publishing' for ambiguous outcomes, and 'auth_failed' only
+        # for a confirmed pre-upload invalid_grant. Do not retry automatically.
         raise
     return completed
