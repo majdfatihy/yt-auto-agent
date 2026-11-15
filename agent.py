@@ -11,6 +11,7 @@ import shutil
 import hashlib
 from approved_publish import publish_approved_clips
 from reel_metadata import generate_reel_metadata
+from text_ai import generate_json
 from youtube_source import download_youtube_video
 from drive_source import is_drive_url, download_drive_video
 from pathlib import Path
@@ -337,29 +338,10 @@ def analyze_with_gemini(transcript_text, video_url):
     8. "quora_en": منشور احترافي لمنصة Quora باللغة الإنجليزية يلتزم بسياسة النشر، مدمج بداخل نصه رابط الفيديو ({video_url})، ويحتوي على هاشتاج واحد فقط.
     """
 
-    models_to_try = [
-        'gemini-3.1-pro-preview',
-        'gemini-3.1-flash-preview',
-        'gemini-3.1-flash-lite-preview',
-        'gemini-3-flash-preview'
-    ]
-    last_err = None
-
-    for model_name in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config={'response_mime_type': 'application/json'}
-            )
-            parsed = validate_gemini_data(parse_gemini_json(response.text))
-            print(f"✅ نجح توليد JSON صالح باستخدام نموذج: {model_name}")
-            return parsed
-        except Exception as e:
-            print(f"⚠️ فشلت محاولة النموذج {model_name} ({type(e).__name__}: {str(e)[:180]})، جاري تجربة البديل...")
-            last_err = e
-
-    raise last_err
+    result, provider = generate_json(
+        prompt, GEMINI_KEY, 'SEO_MODELS', validate_gemini_data)
+    print('SEO_GENERATOR: ' + provider)
+    return result
 
 
 # ==========================================
@@ -611,7 +593,7 @@ if __name__ == "__main__":
             summary += '\n'.join(
                 f"{clip['id']}. {clip['title']} ({round(clip['start_time'])}–{round(clip['end_time'])}ث)"
                 for clip in plan['clips'])
-            if plan.get('method') != 'gemini':
+            if plan.get('method') == 'timed_transcript_fallback':
                 summary += '\nبعض العناوين مقتطفات حرفية من التفريغ.'
             send_telegram(summary, reply_markup=_proposals_keyboard(plan))
             raise SystemExit(0)
