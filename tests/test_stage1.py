@@ -18,22 +18,20 @@ class TestClipPlanner(unittest.TestCase):
             for i in range(23)
         ]
 
-    def test_fallback_with_groq_timing(self):
+    def test_rejects_raw_transcript_fallback_when_ai_unavailable(self):
         with patch.object(clip_planner, '_gemini_candidates', return_value=[]):
-            plan = clip_planner.build_clip_plan('https://youtu.be/abc', 'file_abc', self.cues, 92.3, '')
-        self.assertEqual(plan['status'], 'awaiting_selection')
-        self.assertEqual(len(plan['clips']), 3)
-        self.assertEqual(plan['method'], 'timed_transcript_fallback')
-        self.assertEqual([c['id'] for c in plan['clips']], [1, 2, 3])
-        for c in plan['clips']:
-            self.assertTrue(15 <= c['end_time'] - c['start_time'] <= 59)
-            self.assertLessEqual(c['end_time'], 92.3)
-            self.assertIn('مقتطف:', c['title'])
-        self.assertIn('لم يتم قص أي فيديو', clip_planner.format_clip_plan(plan))
+            with self.assertRaisesRegex(RuntimeError, 'CLIP_TITLES_UNAVAILABLE'):
+                clip_planner.build_clip_plan(
+                    'https://youtu.be/abc', 'file_abc', self.cues, 92.3, '')
+
+    def test_rejects_greetings_as_publishable_titles(self):
+        self.assertIsNone(clip_planner._validate({
+            'title': 'مرحبا بكم يا شباب وان شاء الله تكونوا بخير',
+            'start_time': 0, 'end_time': 30}, self.cues, 92.3))
 
     def test_grounded_suggestions_preferred(self):
         candidates = [
-            {"title": f"شرح الميزة {i}", "start_time": i * 25, "end_time": i * 25 + 30}
+            {"title": f"خطوات تحسين قناة يوتيوب وتجربة الميزة {i}", "start_time": i * 25, "end_time": i * 25 + 30}
             for i in range(3)
         ]
         with patch.object(clip_planner, '_gemini_candidates', return_value=candidates):
