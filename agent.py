@@ -10,6 +10,7 @@ import time
 import shutil
 import hashlib
 from approved_publish import publish_approved_clips
+from reel_metadata import generate_reel_metadata
 from youtube_source import download_youtube_video
 from drive_source import is_drive_url, download_drive_video
 from pathlib import Path
@@ -391,8 +392,22 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
     duration = min(duration, length-start)
     if duration < 14.9:
         raise ValueError('Source video is too short for the requested reel interval')
+    # Two layers from the exact same source: fill the canvas with a cheap
+    # low-resolution blur; preserve the complete, undistorted source on top.
+    # No cropping of the original foreground and no black padding.
+    filter_complex = (
+        '[0:v]split=2[bgsrc][fgsrc];'
+        '[bgsrc]scale=270:480:force_original_aspect_ratio=increase,'
+        'crop=270:480,setsar=1,boxblur=12:2,'
+        'scale=1080:1920:flags=bicubic[bg];'
+        '[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease,'
+        'setsar=1[fg];'
+        '[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto,'
+        'format=yuv420p,setsar=1[v]'
+    )
     ffmpeg_cmd = ['ffmpeg','-hide_banner','-y','-ss',str(start),'-i',str(target),'-t',str(duration),
-                  '-vf','scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
+                  '-filter_complex',filter_complex,
+                  '-map','[v]','-map','0:a:0?',
                   '-c:v','libx264','-preset','fast','-crf','23','-pix_fmt','yuv420p',
                   '-c:a','aac','-b:a','128k','-movflags','+faststart','output_reel.mp4']
     subprocess.run(ffmpeg_cmd,check=True,timeout=900)
@@ -501,6 +516,7 @@ if __name__ == "__main__":
                                 'video_url': VIDEO_URL, 'telegram_file_id': TELEGRAM_FILE_ID,
                                 'previewed_ids': chosen_ids, 'files': {}}
             preview_cues = None  # One local-source transcription for all chosen clips.
+            preview_metadata = {}
             for clip_id in chosen_ids:
                 if plan_reference(load_clip_plan()) != expected_ref:
                     raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
@@ -523,13 +539,30 @@ if __name__ == "__main__":
                     preview_cues = preserve_approved_word_edits(original_cues, reviewed_cues, approved_cues)
                 captioned_preview = burn_captions(
                     'output_reel.mp4', preview_cues, clip['start_time'], clip['end_time'])
+                # Fail closed on broken dimensions, before offering or approving a preview.
+                dimensions = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                     '-show_entries', 'stream=width,height', '-of', 'json',
+                     captioned_preview],
+                    check=True, capture_output=True, text=True, timeout=30)
+                streams = json.loads(dimensions.stdout).get('streams', [])
+                if len(streams) != 1 or streams[0].get('width') != 1080 or streams[0].get('height') != 1920:
+                    raise RuntimeError('REEL_DIMENSIONS_INVALID: expected 1080x1920')
+                reel_meta = generate_reel_metadata(
+                    preview_cues, clip['start_time'], clip['end_time'],
+                    clip['title'], GEMINI_KEY)
+                preview_metadata[str(clip_id)] = reel_meta
                 # Reuse input.mp4 in this same runner for any subsequent selection.
                 if Path('input.mp4').is_file():
                     os.environ['SOURCE_VIDEO_FILE'] = str(Path('input.mp4').resolve())
                 stamp_start = f"{clip['start_time']:.1f}"
                 stamp_end = f"{clip['end_time']:.1f}"
                 send_telegram_video(captioned_preview,
-                                    f"معاينة {clip_id}: {clip['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
+                                    f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
+                send_telegram(
+                    f"بيانات الريلز {clip_id} قبل الاعتماد:\n"
+                    f"العنوان: {reel_meta['title']}\n"
+                    f"الوصف والهاشتاغات:\n{reel_meta['description']}")
                 stored = preview_dir / f'clip-{clip_id}.mp4'
                 shutil.copyfile(captioned_preview, stored)
                 preview_manifest['files'][str(clip_id)] = hashlib.sha256(stored.read_bytes()).hexdigest()
@@ -538,7 +571,8 @@ if __name__ == "__main__":
                 raise RuntimeError('PREVIEW_RUN_ID_MISSING')
             (preview_dir / 'manifest.json').write_text(
                 json.dumps(preview_manifest, ensure_ascii=False), encoding='utf-8')
-            record_preview_result(expected_ref, chosen_ids, preview_manifest['preview_run_id'])
+            record_preview_result(expected_ref, chosen_ids, preview_manifest['preview_run_id'],
+                                  preview_metadata)
             send_telegram('✅ اكتملت معاينة المقاطع ' + '، '.join(map(str, chosen_ids)) +
                           '. راجع الفيديوهات، ثم استخدم زر الاعتماد. لم يتم النشر.',
                           reply_markup=_preview_keyboard(plan, chosen_ids))

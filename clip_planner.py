@@ -312,11 +312,26 @@ def load_clip_plan():
     return plan
 
 
-def record_preview_result(expected_reference, clip_ids, run_id=None):
-    """Avoid overwriting a newer /prepare list after rendering an old selection."""
+def record_preview_result(expected_reference, clip_ids, run_id=None, clip_metadata=None):
+    """Persist the precise transcript-based title/description reviewed at preview."""
     latest = load_clip_plan()
     if plan_reference(latest) != expected_reference:
         raise RuntimeError('CLIP_PLAN_CHANGED: new suggestions were saved during rendering')
+    if not isinstance(clip_metadata, dict) or set(clip_metadata) != set(map(str, clip_ids)):
+        raise RuntimeError('REEL_METADATA_MISSING_FOR_PREVIEW')
+    for clip in latest['clips']:
+        if clip['id'] not in clip_ids:
+            continue
+        value = clip_metadata.get(str(clip['id']))
+        if not isinstance(value, dict):
+            raise RuntimeError('REEL_METADATA_INVALID_FOR_PREVIEW')
+        title, description = value.get('title'), value.get('description')
+        if not isinstance(title, str) or not 8 <= len(title) <= 100 or not isinstance(description, str) or not description.strip():
+            raise RuntimeError('REEL_METADATA_INVALID_FOR_PREVIEW')
+        if re.search(r'https?://|youtu\.be|youtube\.com', description, re.I):
+            raise RuntimeError('REEL_METADATA_SOURCE_LINK_PROHIBITED')
+        clip['reel_title'] = title
+        clip['reel_description'] = description
     latest['status'] = 'previewed_awaiting_approval'
     latest['previewed_ids'] = clip_ids
     latest['previewed_utc'] = datetime.now(timezone.utc).isoformat()
