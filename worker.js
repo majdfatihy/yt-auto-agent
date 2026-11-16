@@ -976,8 +976,13 @@ async function processUpdate(env, update) {
       const hashtags=(clip.reel_description||'').split('\n').at(-1);
       clip.reel_description=lines.join('\n')+'\n'+hashtags;
     } else {
-      if(value.length>500||value.length<5||value.includes('#')||!value.includes(','))
-        return send(env,'العلامات لا تتعدى 500 حرف؛ افصل بينها بفاصلة إنجليزية واحدة ,');
+      const tags=value.split(',').map(x=>x.trim());
+      const tagCost=tags.reduce((sum,t)=>sum+t.length+(t.includes(' ')?2:0),0)+tags.length-1;
+      if(value.length>500||tags.length<6||tags.length>20||
+         tags.some(x=>!x||x.length>65||x.includes('#'))||
+         new Set(tags.map(x=>x.toLowerCase())).size!==tags.length||
+         tagCost>500)
+        return send(env,'العلامات من 6 إلى 20 عبارة، ومجموعها مع فواصل يوتيوب لا يتجاوز 500 حرف. استخدم فاصلة إنجليزية واحدة ,');
       clip.reel_tags_string=value;
     }
     await writePlan(env,p);
