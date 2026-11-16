@@ -37,7 +37,7 @@ class TopicPlanTests(unittest.TestCase):
              "title":"طريقة استقبال الحوالة الدولية على فودافون كاش",
              "hashtag":"#فودافون_كاش"}]
         history=[{"start_time":0,"end_time":40,"serial":2,
-                  "youtube_id":"abcdefghijk"}]
+                  "youtube_video_id":"abcdefghijk"}]
         plan,_=build_topic_plan("https://youtu.be/abcdefghijk","",
                                self.cues,140,history,"fake",59)
         self.assertEqual(plan["clips"][0]["serial"],3)
