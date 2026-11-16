@@ -475,9 +475,14 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
     The user must still explicitly authorize any YouTube upload.
     """
     clips_by_id = {item['id']: item for item in plan['clips']}
-    send_telegram('بدأ تجهيز معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)))
-    fetch_telegram_source()
-    fetch_drive_source()
+    if AGENT_ACTION == 'preview':
+        send_telegram('بدأ تجهيز معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)))
+    # During automatic /prepare, the original source is already downloaded.
+    # Do not fetch the same Google Drive/Telegram video for a second time.
+    cached_source = os.getenv('SOURCE_VIDEO_FILE', '').strip()
+    if not cached_source or not Path(cached_source).is_file():
+        fetch_telegram_source()
+        fetch_drive_source()
     preview_dir = Path('previews')
     preview_dir.mkdir(exist_ok=True)
     preview_manifest = {'plan_ref': expected_ref, 'preview_run_id': os.getenv('GITHUB_RUN_ID', ''),
@@ -600,7 +605,8 @@ if __name__ == "__main__":
             prepare_selected_previews(plan, chosen_ids, expected_ref)
             raise SystemExit(0)
 
-        send_telegram(f"⏳ بدأ الوكيل مهمة {AGENT_ACTION} للفيديو:\n{VIDEO_URL}")
+        if AGENT_ACTION == 'seo':
+            send_telegram(f"⏳ بدأ الوكيل مهمة SEO للفيديو:\n{VIDEO_URL}")
 
         fetch_telegram_source()
         fetch_drive_source()
@@ -631,7 +637,6 @@ if __name__ == "__main__":
             plan = build_clip_plan(VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, GEMINI_KEY)
             save_clip_plan(plan)
             selected_id = plan.get('recommended_clip_id', plan['clips'][0]['id'])
-            send_telegram('تم تحليل الفيديو واختيار أفضل مقطع. جارٍ تجهيز معاينته وبيانات SEO تلقائيًا؛ لا يوجد نشر.')
             prepare_selected_previews(plan, [selected_id], plan_reference(plan))
             # The remaining proposals are still available from the existing menu,
             # but do not require any extra step for the recommended reel.
