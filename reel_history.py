@@ -113,7 +113,7 @@ def load_history(source_url, http=requests):
 
 
 def record_published(source_url, start, end, youtube_id, *,
-                     publication_status="private", http=requests):
+                     publication_status="private", serial=None, http=requests):
     if not re.fullmatch(r"[\w-]{11}", str(youtube_id)):
         raise RuntimeError("YOUTUBE_ID_UNCONFIRMED: never mark unknown upload published")
     history = load_history(source_url, http=http)
@@ -125,6 +125,7 @@ def record_published(source_url, start, end, youtube_id, *,
     history.append({
         "start_time": round(float(start), 2), "end_time": round(float(end), 2),
         "youtube_video_id": youtube_id, "status": publication_status,
+        **({"serial": serial} if type(serial) is int and serial >= 1 else {}),
         "source": "verified_upload",
         "recorded_utc": datetime.now(timezone.utc).isoformat()
     })
