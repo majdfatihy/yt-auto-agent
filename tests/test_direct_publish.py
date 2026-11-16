@@ -102,12 +102,12 @@ class DirectPublishTests(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(folder)
-                with patch("direct_publish.load_clip_plan", side_effect=load), \\
-                     patch("direct_publish.save_clip_plan", side_effect=save), \\
+                with patch("direct_publish.load_clip_plan", side_effect=load), \
+                     patch("direct_publish.save_clip_plan", side_effect=save), \
                      patch("direct_publish.load_clip_transcripts", return_value={
-                         "cues": [{"start":1,"end":41,"text":"قديم"}]}), \\
-                     patch("direct_publish.load_caption_cues", return_value=reviewed), \\
-                     patch("direct_publish.load_history", return_value=[]), \\
+                         "cues": [{"start":1,"end":41,"text":"قديم"}]}), \
+                     patch("direct_publish.load_caption_cues", return_value=reviewed), \
+                     patch("direct_publish.load_history", return_value=[]), \
                      patch("direct_publish.record_published"):
                     publish_direct(state["created_utc"], "1", state["video_url"], "",
                         render, caption, lambda *a, **k: (
