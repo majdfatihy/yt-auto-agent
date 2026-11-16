@@ -73,6 +73,11 @@ def build_remaining_plan(video_url, telegram_file_id, timed_cues, duration, hist
     if not cues:
         raise ValueError("لا يمكن تقسيم الفيديو دون تفريغ زمني موثوق.")
     published = published_windows(history)
+    # Preserve unique sequence numbers across repeated /prepare requests.
+    # Previously uploaded reels can be sparse if only a custom subset was approved.
+    existing_serials = [x.get("serial") for x in history if isinstance(x, dict)
+                        and type(x.get("serial")) is int and x["serial"] >= 1]
+    serial_floor = max([len(published), *existing_serials])
     remaining = remaining_intervals(duration, published)
     clips = []
     excluded_silence = []
@@ -88,7 +93,7 @@ def build_remaining_plan(video_url, telegram_file_id, timed_cues, duration, hist
                 truncated.append([a, b])
                 continue
             idx = len(clips) + 1
-            serial = len(published) + idx
+            serial = serial_floor + idx
             clips.append({
                 "id": idx, "serial": serial,
                 "title": f"الريلز {serial}: {int(a)}–{int(b)} ثانية من الفيديو",
