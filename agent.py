@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from approved_publish import publish_approved_clips
 from reel_metadata import generate_reel_metadata, parse_youtube_tags
 from reel_full_plan import build_remaining_plan
+from reel_video_layout import ffprobe_layout, layout_filter
 from reel_history import load_history, has_overlap, published_windows
 from source_video_info import original_youtube_id, read_source_facts, preview_fact_lines
 from telegram_reel_details import format_reel_details
@@ -136,13 +137,10 @@ def _proposals_keyboard(plan):
 
 def _preview_keyboard(plan, chosen_ids):
     ref = _ui_fingerprint(plan)
-    # Cloudflare Worker must be deployed BEFORE sending new callback types.
-    # Until that deployment is confirmed, use the existing /approve handler
-    # so a user never receives a button that silently does nothing.
-    quick = os.getenv('TELEGRAM_ONE_TAP_ENABLED', '').lower() == 'true'
-    action = 'approvepublish' if quick else 'approve'
-    label = ('✅ موافق: اعتماد ونشر خاص للمقطع ' if quick
-             else '✅ اعتماد المعاينة ') + '، '.join(map(str, chosen_ids))
+    # Cloudflare Worker has the one-tap callback in production.
+    # Explicit approval directly queues the upload, with no second confirmation.
+    action = 'approvepublish'
+    label = '✅ اعتماد ونشر فورًا للمقطع ' + '، '.join(map(str, chosen_ids))
     return {'inline_keyboard': [
         [{'text': label,
           'callback_data': f'p:{action}:{ref}:{os.getenv("GITHUB_RUN_ID", "")}'}],
@@ -388,22 +386,16 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
     duration = min(duration, length-start)
     if duration < 14.9:
         raise ValueError('Source video is too short for the requested reel interval')
-    # Two layers from the exact same source: fill the canvas with a cheap
-    # low-resolution blur; preserve the complete, undistorted source on top.
-    # No cropping of the original foreground and no black padding.
-    filter_complex = (
-        '[0:v]split=2[bgsrc][fgsrc];'
-        '[bgsrc]scale=270:480:force_original_aspect_ratio=increase,'
-        'crop=270:480,setsar=1,boxblur=12:2,'
-        'scale=1080:1920:flags=bicubic[bg];'
-        '[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease,'
-        'setsar=1[fg];'
-        '[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto,'
-        'format=yuv420p,setsar=1[v]'
-    )
-    ffmpeg_cmd = ['ffmpeg','-hide_banner','-y','-ss',str(start),'-i',str(target),'-t',str(duration),
-                  '-filter_complex',filter_complex,
-                  '-map','[v]','-map','0:a:0?',
+    width, height, ratio = ffprobe_layout(target)
+    chosen_filter, render_mode = layout_filter(width, height, ratio)
+    print(f"REEL_SOURCE_LAYOUT: {width}x{height}; ASPECT={ratio:.4f}; "
+          f"MODE={render_mode}; BLUR={'NO' if render_mode == 'native_vertical_no_blur' else 'YES'}")
+    ffmpeg_cmd = ['ffmpeg','-hide_banner','-y','-ss',str(start),'-i',str(target),'-t',str(duration)]
+    if render_mode == 'native_vertical_no_blur':
+        ffmpeg_cmd += ['-vf', chosen_filter, '-map','0:v:0']
+    else:
+        ffmpeg_cmd += ['-filter_complex',chosen_filter,'-map','[v]']
+    ffmpeg_cmd += ['-map','0:a:0?',
                   '-c:v','libx264','-preset','fast','-crf','23','-pix_fmt','yuv420p',
                   '-c:a','aac','-b:a','128k','-movflags','+faststart','output_reel.mp4']
     subprocess.run(ffmpeg_cmd,check=True,timeout=900)
@@ -469,7 +461,7 @@ def upload_to_youtube(video_path, title, description, tags_str, *,
                 "defaultLanguage": "ar"
             },
             "status": {
-                "privacyStatus": os.getenv("YT_PRIVACY_STATUS", "private"),
+                "privacyStatus": os.getenv("YT_PRIVACY_STATUS", "public"),
                 "selfDeclaredMadeForKids": False
             }
         }
@@ -600,9 +592,7 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         json.dumps(preview_manifest, ensure_ascii=False), encoding='utf-8')
     record_preview_result(expected_ref, chosen_ids, preview_manifest['preview_run_id'],
                           preview_metadata)
-    quick = os.getenv('TELEGRAM_ONE_TAP_ENABLED', '').lower() == 'true'
-    next_step = ('اضغط موافق: اعتماد ونشر خاص.' if quick
-                 else 'اضغط اعتماد المعاينة، وبعدها أكّد النشر الخاص من القائمة.')
+    next_step = 'اضغط اعتماد ونشر فورًا مرة واحدة.'
     send_telegram('✅ المعاينة وبيانات SEO جاهزة للمقطع ' + '، '.join(map(str, chosen_ids)) +
                   '. راجع الفيديو ثم ' + next_step + ' لم يتم النشر.',
                   reply_markup=_preview_keyboard(plan, chosen_ids))
