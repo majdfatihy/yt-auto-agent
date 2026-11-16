@@ -85,6 +85,40 @@ class DirectPublishTests(unittest.TestCase):
     def test_unknown_result_locks_for_manual_review(self):
         self.run_upload("❌ يوتيوب خطأ: timeout","needs_review")
 
+    def test_published_captions_match_the_saved_reviewed_preview(self):
+        state = base_plan()
+        state["clip_jobs"]["1"]["captions"] = True
+        state["caption_cues_chunks"] = 1
+        reviewed = [{"start": 1.0, "end": 1.5, "text": "تصحيح"}]
+        captured = []
+        def load(): return copy.deepcopy(state)
+        def save(value): state.clear(); state.update(copy.deepcopy(value))
+        def render(*_, **kwargs):
+            Path("output_reel.mp4").write_bytes(b"mp4" * 6000)
+        def caption(video, cues, start, end):
+            captured.extend(cues)
+            return video
+        with tempfile.TemporaryDirectory() as folder:
+            previous = Path.cwd()
+            try:
+                os.chdir(folder)
+                with patch("direct_publish.load_clip_plan", side_effect=load), \\
+                     patch("direct_publish.save_clip_plan", side_effect=save), \\
+                     patch("direct_publish.load_clip_transcripts", return_value={
+                         "cues": [{"start":1,"end":41,"text":"قديم"}]}), \\
+                     patch("direct_publish.load_caption_cues", return_value=reviewed), \\
+                     patch("direct_publish.load_history", return_value=[]), \\
+                     patch("direct_publish.record_published"):
+                    publish_direct(state["created_utc"], "1", state["video_url"], "",
+                        render, caption, lambda *a, **k: (
+                            "✅ يوتيوب: تم رفع الفيديو بنجاح بوضع unlisted "
+                            "(https://youtu.be/abcdefghijk)"),
+                        lambda _: None, lambda:None, lambda:None)
+            finally:
+                os.chdir(previous)
+        self.assertEqual(captured, reviewed)
+        self.assertEqual(state["clip_jobs"]["1"]["state"], "published")
+
 
 if __name__=="__main__":
     unittest.main()
