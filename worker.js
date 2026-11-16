@@ -1034,14 +1034,17 @@ async function processUpdate(env, update) {
     return send(env,p.schedule_paused?'⏸️ أوقفت بدء الرفع المجدول.':'▶️ استأنفت الجدولة.');
   }
   if(cmd==='/publishnow') {
-    const p=await readPlan(env);
-    if(!topicPlan(p)||!sameSource(source,p))
-      return send(env,'لا توجد قائمة جاهزة للنشر المباشر.');
-    const raw=text.slice(text.split(/\s+/)[0].length).trim();
-    const ids=raw==='all'?openClips(p).map(c=>c.id):
-      raw?parseChoices(raw,p):selectedOpen(p,await selection(env,p));
-    try {return await queueTopicJobs(env,source,p,ids);}
-    catch(e){return send(env,'⚠️ '+String(e.message||e));}
+    try {
+      const p=await readPlan(env);
+      if(!topicPlan(p)||!sameSource(source,p))
+        return send(env,'لا توجد قائمة جاهزة للنشر المباشر.');
+      const raw=text.slice(text.split(/\s+/)[0].length).trim();
+      const ids=raw==='all'?openClips(p).map(c=>c.id):
+        raw?parseChoices(raw,p):selectedOpen(p,await selection(env,p));
+      return await queueTopicJobs(env,source,p,ids);
+    } catch(e) {
+      return send(env,'⚠️ '+String(e.message||e));
+    }
   }
 
   if (cmd === '/schedule') {
