@@ -355,6 +355,8 @@ def record_preview_result(expected_reference, clip_ids, run_id=None, clip_metada
         clip['reel_seo_version'] = 3 if latest.get('version', 1) >= 2 else 2
         clip['reel_long_titles'] = value.get('long_titles', [])
         clip['reel_short_titles'] = value.get('short_titles', [])
+        clip['recording_date'] = value.get('recording_date')
+        clip['source_published_at'] = value.get('source_published_at')
     latest['status'] = 'previewed_awaiting_approval'
     latest['previewed_ids'] = clip_ids
     latest['previewed_utc'] = datetime.now(timezone.utc).isoformat()
