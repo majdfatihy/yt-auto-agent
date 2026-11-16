@@ -39,3 +39,4 @@ jobs:
           python -m unittest discover -s tests -p test_stage1.py -v
           python -m unittest discover -s tests -p test_stage2.py -v
           python -m unittest discover -s tests -p test_source_video_info.py -v
+          python -m unittest discover -s tests -p test_preview_button_rollout.py -v

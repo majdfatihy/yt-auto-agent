@@ -133,9 +133,16 @@ def _proposals_keyboard(plan):
 
 def _preview_keyboard(plan, chosen_ids):
     ref = _ui_fingerprint(plan)
+    # Cloudflare Worker must be deployed BEFORE sending new callback types.
+    # Until that deployment is confirmed, use the existing /approve handler
+    # so a user never receives a button that silently does nothing.
+    quick = os.getenv('TELEGRAM_ONE_TAP_ENABLED', '').lower() == 'true'
+    action = 'approvepublish' if quick else 'approve'
+    label = ('✅ موافق: اعتماد ونشر خاص للمقطع ' if quick
+             else '✅ اعتماد المعاينة ') + '، '.join(map(str, chosen_ids))
     return {'inline_keyboard': [
-        [{'text': '✅ موافق: اعتماد ونشر خاص للمقطع ' + '، '.join(map(str, chosen_ids)),
-          'callback_data': f'p:approvepublish:{ref}:{os.getenv("GITHUB_RUN_ID", "")}'}],
+        [{'text': label,
+          'callback_data': f'p:{action}:{ref}:{os.getenv("GITHUB_RUN_ID", "")}'}],
         [{'text': '🎬 تجربة مقطع آخر', 'callback_data': f'p:menu:{ref}'}]
     ]}
 
@@ -570,8 +577,11 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         json.dumps(preview_manifest, ensure_ascii=False), encoding='utf-8')
     record_preview_result(expected_ref, chosen_ids, preview_manifest['preview_run_id'],
                           preview_metadata)
-    send_telegram('✅ المعاينة والبيانات جاهزة للمراجعة للمقطع ' + '، '.join(map(str, chosen_ids)) +
-                  '. إذا كانت مناسبة، اضغط موافق: اعتماد ونشر خاص. لم يتم النشر.',
+    quick = os.getenv('TELEGRAM_ONE_TAP_ENABLED', '').lower() == 'true'
+    next_step = ('اضغط موافق: اعتماد ونشر خاص.' if quick
+                 else 'اضغط اعتماد المعاينة، وبعدها أكّد النشر الخاص من القائمة.')
+    send_telegram('✅ المعاينة وبيانات SEO جاهزة للمقطع ' + '، '.join(map(str, chosen_ids)) +
+                  '. راجع الفيديو ثم ' + next_step + ' لم يتم النشر.',
                   reply_markup=_preview_keyboard(plan, chosen_ids))
 
 
