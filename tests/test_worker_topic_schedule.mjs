@@ -76,6 +76,15 @@ await msg('/privacy 1 unlisted');
 assert.equal(plan.clip_settings['1'].privacy,'unlisted');
 await msg('/captions 1 off');
 assert.equal(plan.clip_settings['1'].captions,false);
+// Item 7: global defaults and individual overrides must reach the actual preview job.
+await msg('/blur off');
+await msg('/blur 1 on');
+await msg('/clip 1');
+assert.equal(dispatches.length,1);
+assert.equal(dispatches[0].client_payload.agent_action,'preview');
+const previewOptions=JSON.parse(dispatches[0].client_payload.clip_options);
+assert.deepEqual(previewOptions['1'],{captions:false,blur:'on',privacy:'unlisted'});
+dispatches.length=0; // Preview dispatch is deliberately not a YouTube upload.
 await msg('/title 1 طريقة جديدة لاستقبال الحوالة عبر فودافون كاش');
 assert.ok(plan.clips[0].reel_title.endsWith('#فودافون_كاش 1'));
 await msg('/menu');
@@ -86,14 +95,28 @@ const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Cairo',
   year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(future);
 const get=k=>parts.find(p=>p.type===k).value;
 const start=get('year')+'-'+get('month')+'-'+get('day')+' '+get('hour')+':'+get('minute');
+await msg('/schedule '+start+' 1h');
+assert.equal(Date.parse(plan.schedule_draft.items['2'])-
+  Date.parse(plan.schedule_draft.items['1']),3600000);
+await msg('/schedule '+start+' 1d');
+assert.equal(Date.parse(plan.schedule_draft.items['3'])-
+  Date.parse(plan.schedule_draft.items['2']),86400000);
 await msg('/schedule '+start+' 10m');
 assert.deepEqual(plan.schedule_draft.ids,[1,2,3]);
+assert.equal(Date.parse(plan.schedule_draft.items['2'])-
+  Date.parse(plan.schedule_draft.items['1']),600000);
 await click(button('اعتماد وتنفيذ الجدولة'));
 assert.equal(plan.clip_jobs['1'].state,'pending');
 assert.equal(plan.clip_jobs['2'].state,'pending');
 assert.equal(plan.clip_jobs['1'].privacy,'unlisted');
 assert.equal(plan.clip_jobs['1'].captions,false);
 assert.equal(dispatches.length,0,'no publishing before due');
+await msg('/pause');
+assert.equal(plan.schedule_paused,true);
+await worker.scheduled({scheduledTime:Date.parse(plan.clip_jobs['1'].due_utc)+60000},env,{});
+assert.equal(dispatches.length,0,'pause must prevent future scheduled dispatches');
+await msg('/resume');
+assert.equal(plan.schedule_paused,false);
 await worker.scheduled({scheduledTime:Date.parse(plan.clip_jobs['1'].due_utc)+60000},env,{});
 assert.equal(dispatches.length,1);
 assert.equal(dispatches[0].client_payload.agent_action,'direct_publish');
@@ -107,6 +130,16 @@ await msg('/stop');
 assert.equal(plan.clip_jobs['2'].state,'cancelled');
 assert.equal(plan.clip_jobs['3'].state,'cancelled');
 assert.equal(plan.clip_jobs['1'].state,'queued');
+// Item 8: scheduling a single reel separately retains public privacy and needs approval.
+plan={...plan,created_utc:'2026-11-16T02:00:00Z',
+  clip_jobs:{},schedule_paused:false};
+await msg('/schedule 2 '+start);
+assert.deepEqual(plan.schedule_draft.ids,[2]);
+assert.equal(dispatches.length,1,'draft must not upload before approval');
+await click(button('اعتماد وتنفيذ الجدولة'));
+assert.equal(plan.clip_jobs['2'].state,'pending');
+assert.equal(plan.clip_jobs['2'].privacy,'public');
+assert.equal(dispatches.length,1,'pending public reel must not upload early');
 // HTTP failure may happen after GitHub accepted a dispatch. Lock and do not retry.
 plan={...plan,created_utc:'2026-11-17T00:00:00Z',clip_jobs:{},schedule_paused:false};
 failNextDispatch=true;
