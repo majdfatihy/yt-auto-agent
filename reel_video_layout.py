@@ -51,16 +51,23 @@ def ffprobe_layout(path, run=subprocess.run):
     return display_dimensions(json.loads(output.stdout))
 
 
-def layout_filter(width, height, ratio):
+def layout_filter(width, height, ratio, blur_mode='auto'):
+    if blur_mode not in ('auto', 'on', 'off'):
+        raise ValueError('REEL_BLUR_MODE_INVALID')
     target_ratio = 9 / 16
     # A truly vertical Shorts/Reels source can be scaled straight to canvas.
     # Tolerance allows occasional slightly nonstandard mobile exports.
-    if height > width and abs(ratio - target_ratio) <= 0.007:
+    if blur_mode != 'on' and height > width and abs(ratio - target_ratio) <= 0.007:
         return (
             ("format=yuv420p,setsar=1" if width == 1080 and height == 1920
              else "scale=1080:1920:flags=bicubic,setsar=1,format=yuv420p"),
             "native_vertical_no_blur"
         )
+    if blur_mode == 'off':
+        # No blur and no cropping. Preserve the foreground against a solid canvas.
+        return ("scale=1080:1920:force_original_aspect_ratio=decrease,"
+                "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
+                "setsar=1,format=yuv420p", "solid_background_no_blur")
     return (
         "[0:v]split=2[bgsrc][fgsrc];"
         "[bgsrc]scale=270:480:force_original_aspect_ratio=increase,"

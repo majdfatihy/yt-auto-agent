@@ -14,6 +14,9 @@ from approved_publish import publish_approved_clips
 from reel_metadata import generate_reel_metadata, parse_youtube_tags
 from reel_full_plan import build_remaining_plan
 from reel_video_layout import ffprobe_layout, layout_filter
+from reel_topics import build_topic_plan
+from reel_transcript_store import store_clip_transcripts, load_clip_transcripts
+from direct_publish import publish_direct
 from reel_history import load_history, has_overlap, published_windows
 from source_video_info import original_youtube_id, read_source_facts, preview_fact_lines
 from telegram_reel_details import format_reel_details
@@ -359,7 +362,7 @@ def analyze_with_gemini(transcript_text, video_url):
 # ==========================================
 # 5. دالة التحميل والمونتاج إلى ريلز (9:16)
 # ==========================================
-def download_and_convert_to_reel(url, start_sec, end_sec):
+def download_and_convert_to_reel(url, start_sec, end_sec, blur_mode='auto'):
     """Download with bounded retries, or accept a Telegram-supplied local MP4."""
     source = Path(os.getenv("SOURCE_VIDEO_FILE", "").strip())
     target = Path("input.mp4")
@@ -381,17 +384,17 @@ def download_and_convert_to_reel(url, start_sec, end_sec):
     if not math.isfinite(start) or not math.isfinite(end):
         raise ValueError('Invalid reel interval: non-finite timestamp')
     duration = end - start
-    if start < 0 or start >= length or duration < 15 or duration > 59 or end > length + 0.15:
+    if start < 0 or start >= length or duration < 15 or duration > 180 or end > length + 0.15:
         raise ValueError(f'Invalid reel interval: start={start}, end={end}, source duration={length:.1f}')
     duration = min(duration, length-start)
     if duration < 14.9:
         raise ValueError('Source video is too short for the requested reel interval')
     width, height, ratio = ffprobe_layout(target)
-    chosen_filter, render_mode = layout_filter(width, height, ratio)
+    chosen_filter, render_mode = layout_filter(width, height, ratio, blur_mode=blur_mode)
     print(f"REEL_SOURCE_LAYOUT: {width}x{height}; ASPECT={ratio:.4f}; "
           f"MODE={render_mode}; BLUR={'NO' if render_mode == 'native_vertical_no_blur' else 'YES'}")
     ffmpeg_cmd = ['ffmpeg','-hide_banner','-y','-ss',str(start),'-i',str(target),'-t',str(duration)]
-    if render_mode == 'native_vertical_no_blur':
+    if render_mode != 'letterbox_blurred_background':
         ffmpeg_cmd += ['-vf', chosen_filter, '-map','0:v:0']
     else:
         ffmpeg_cmd += ['-filter_complex',chosen_filter,'-map','[v]']
@@ -426,7 +429,7 @@ def upload_to_facebook(video_path, title, description):
 
 
 def upload_to_youtube(video_path, title, description, tags_str, *,
-                      publish_at=None, recording_date=None):
+                      publish_at=None, recording_date=None, privacy=None):
     """رفع الفيديو كـ YouTube Shorts مع العنوان والوصف والتاجز"""
     if not YT_CLIENT_ID or not YT_CLIENT_SECRET or not YT_REFRESH_TOKEN:
         return "⏭️ يوتيوب: لم يتم ضبط المفاتيح بعد (تم التخطي)."
@@ -452,6 +455,8 @@ def upload_to_youtube(video_path, title, description, tags_str, *,
             scheduled = _dt.fromisoformat(publish_at.replace("Z", "+00:00"))
             if scheduled.tzinfo is None or scheduled <= _dt.now(_tz.utc):
                 raise ValueError("REEL_SCHEDULE_MUST_BE_IN_FUTURE")
+        if privacy is not None and privacy not in ("public", "private", "unlisted"):
+            raise ValueError("REEL_PRIVACY_INVALID")
         body = {
             "snippet": {
                 "title": title[:100],
@@ -461,7 +466,7 @@ def upload_to_youtube(video_path, title, description, tags_str, *,
                 "defaultLanguage": "ar"
             },
             "status": {
-                "privacyStatus": os.getenv("YT_PRIVACY_STATUS", "public"),
+                "privacyStatus": privacy or os.getenv("YT_PRIVACY_STATUS", "public"),
                 "selfDeclaredMadeForKids": False
             }
         }
@@ -484,7 +489,7 @@ def upload_to_youtube(video_path, title, description, tags_str, *,
         details = ("وقت الرفع لدى يوتيوب: " + original_api_stamp) if original_api_stamp else (
             "وقت اكتمال طلب الرفع (UTC): " + completed_utc)
         public_note = ("موعد النشر العام المجدول: " + publish_at) if publish_at else (
-            "تاريخ النشر للعامة: غير محدد حتى جعله عامًا.")
+            "حالة الظهور عند الرفع: " + body['status']['privacyStatus'] + " (قد تستغرق المعالجة وقتًا).")
         return (f"✅ يوتيوب: تم رفع الفيديو بنجاح بوضع {body['status']['privacyStatus']} "
                 f"(https://youtu.be/{response['id']})\n"
                 f"{details}\n{public_note}")
@@ -521,12 +526,18 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         if plan_reference(load_clip_plan()) != expected_ref:
             raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
         clip = clips_by_id[clip_id]
-        download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'])
+        settings = (plan.get('clip_settings') or {}).get(str(clip_id), {})
+        download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'],
+                                     blur_mode=settings.get('blur', 'auto'))
         if preview_cues is None:
             # Stage 3: trust the audio of the MP4 being cut, never title-only text.
-            preview_cues, preview_source = obtain_timed_transcript(
-                VIDEO_URL, video_path='input.mp4', cookies_file=COOKIES_FILE,
-                prefer_local_audio=True, prefer_word_timestamps=True)
+            if plan.get('method') == 'topic_transcript_ai':
+                preview_cues = load_clip_transcripts(plan).get('cues', [])
+                preview_source = 'saved_prepare_transcript'
+            else:
+                preview_cues, preview_source = obtain_timed_transcript(
+                    VIDEO_URL, video_path='input.mp4', cookies_file=COOKIES_FILE,
+                    prefer_local_audio=True, prefer_word_timestamps=True)
             if not preview_cues:
                 raise RuntimeError('CAPTIONS_UNAVAILABLE: no timed transcription for the selected source; cannot send an uncaptioned preview')
             print(f'PREVIEW_TRANSCRIPTION: {preview_source}; CUES: {len(preview_cues)}')
@@ -553,8 +564,10 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
                     print("SOURCE_YOUTUBE_METADATA_UNAVAILABLE: " + type(exc).__name__)
             source_facts = read_source_facts(
                 VIDEO_URL, cues_to_text(preview_cues), youtube_client)
-        captioned_preview = burn_captions(
-            'output_reel.mp4', preview_cues, clip['start_time'], clip['end_time'])
+        captioned_preview = (
+            burn_captions('output_reel.mp4', preview_cues,
+                          clip['start_time'], clip['end_time'])
+            if settings.get('captions', True) else 'output_reel.mp4')
         # Fail closed on broken dimensions, before offering or approving a preview.
         dimensions = subprocess.run(
             ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
@@ -566,9 +579,18 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
             raise RuntimeError('REEL_DIMENSIONS_INVALID: expected 1080x1920')
         if has_overlap(load_history(VIDEO_URL), clip['start_time'], clip['end_time']):
             raise RuntimeError('REEL_ALREADY_UPLOADED: معاينة المقطع متداخلة مع ريلز منشور من نفس المصدر')
-        reel_meta = generate_reel_metadata(
-            preview_cues, clip['start_time'], clip['end_time'],
-            clip['title'], GEMINI_KEY, clip_number=clip.get('serial', clip['id']))
+        if (plan.get('method') == 'topic_transcript_ai'
+                and clip.get('reel_seo_version') == 3):
+            reel_meta = {
+                'title': clip['reel_title'],
+                'description': clip['reel_description'],
+                'tags_string': clip['reel_tags_string'],
+                'language': clip['reel_language'],
+            }
+        else:
+            reel_meta = generate_reel_metadata(
+                preview_cues, clip['start_time'], clip['end_time'],
+                clip['title'], GEMINI_KEY, clip_number=clip.get('serial', clip['id']))
         reel_meta['recording_date'] = (source_facts or {}).get('source_recorded_at')
         reel_meta['source_published_at'] = (source_facts or {}).get('source_published_at')
         preview_metadata[str(clip_id)] = reel_meta
@@ -585,7 +607,8 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         stored = preview_dir / f'clip-{clip_id}.mp4'
         shutil.copyfile(captioned_preview, stored)
         preview_manifest['files'][str(clip_id)] = hashlib.sha256(stored.read_bytes()).hexdigest()
-        print(f"CLIP_PREVIEW: ID={clip_id}; START={stamp_start}; END={stamp_end}; CAPTIONS_BURNED=YES; DELIVERED=YES")
+        print(f"CLIP_PREVIEW: ID={clip_id}; START={stamp_start}; END={stamp_end}; "
+              f"CAPTIONS_BURNED={'YES' if settings.get('captions', True) else 'NO'}; DELIVERED=YES")
     if not preview_manifest['preview_run_id'].isdigit():
         raise RuntimeError('PREVIEW_RUN_ID_MISSING')
     (preview_dir / 'manifest.json').write_text(
@@ -603,8 +626,69 @@ if __name__ == "__main__":
         if not VIDEO_URL:
             raise ValueError("لم يتم إدخال رابط الفيديو (VIDEO_URL فارغ)!")
 
-        if AGENT_ACTION not in ('seo', 'prepare', 'publish', 'preview'):
+        if AGENT_ACTION not in ('seo', 'prepare', 'publish', 'preview', 'direct_publish', 'metadata'):
             raise ValueError('Unsupported AGENT_ACTION; refusing to publish')
+        if AGENT_ACTION == 'metadata':
+            plan = load_clip_plan()
+            if (plan_reference(plan) != os.getenv('CLIP_PLAN_REF', '').strip() or
+                    plan.get('method') != 'topic_transcript_ai' or
+                    plan.get('video_url') != VIDEO_URL or
+                    plan.get('telegram_file_id', '') != TELEGRAM_FILE_ID):
+                raise RuntimeError('METADATA_PLAN_CHANGED')
+            requested = [int(x) for x in os.getenv('CLIP_IDS','').split(',')
+                         if x.strip().isdigit()]
+            if not requested or len(requested) != len(set(requested)):
+                raise RuntimeError('METADATA_IDS_INVALID')
+            cues = load_clip_transcripts(plan).get('cues', [])
+            if not cues:
+                raise RuntimeError('METADATA_TRANSCRIPT_UNAVAILABLE')
+            fixed, failed = [], []
+            for clip in plan['clips']:
+                if clip['id'] not in requested:
+                    continue
+                if clip.get('seo_ready'):
+                    continue
+                if (plan.get('clip_jobs') or {}).get(str(clip['id'])):
+                    continue
+                try:
+                    meta = generate_reel_metadata(
+                        cues, clip['start_time'],clip['end_time'],
+                        clip['title'], GEMINI_KEY,clip_number=clip['serial'])
+                    clip['title'] = meta['title']
+                    clip['reel_title'] = meta['title']
+                    clip['reel_description'] = meta['description']
+                    clip['reel_tags_string'] = meta['tags_string']
+                    clip['reel_language'] = meta['language']
+                    clip['reel_seo_version'] = 3
+                    clip['seo_ready'] = True
+                    fixed.append(clip['id'])
+                except Exception as error:
+                    failed.append(clip['id'])
+                    print('METADATA_RETRY_FAILED: ' + type(error).__name__)
+            save_clip_plan(plan)
+            send_telegram(
+                f'✅ تمت إعادة تجهيز SEO للمقاطع: {fixed}. '
+                f'ما زالت تحتاج مراجعة: {failed}. افتح القائمة.',
+                reply_markup={'inline_keyboard': [[{
+                    'text':'🎛️ فتح القائمة',
+                    'callback_data':f"p:menu:{_ui_fingerprint(plan)}"
+                }]]})
+            raise SystemExit(0)
+
+        if AGENT_ACTION == 'direct_publish':
+            try:
+                publish_direct(
+                    os.getenv('CLIP_PLAN_REF', '').strip(),
+                    os.getenv('CLIP_IDS', '').strip(),
+                    VIDEO_URL, TELEGRAM_FILE_ID,
+                    download_and_convert_to_reel, burn_captions,
+                    upload_to_youtube, send_telegram,
+                    fetch_telegram_source, fetch_drive_source)
+            except Exception as exc:
+                send_telegram('❌ فشل رفع ريلز معتمد أو تعذر تأكيد نتيجته: ' + str(exc)[:450])
+                raise
+            raise SystemExit(0)
+
         if AGENT_ACTION == 'publish':
             try:
                 publish_approved_clips(
@@ -668,22 +752,47 @@ if __name__ == "__main__":
                 raise SystemExit(0)
             duration = source_duration(local_source or None, timed_cues)
             uploaded_history = load_history(VIDEO_URL)
-            plan = build_remaining_plan(
-                VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, uploaded_history)
+            max_seconds = int(os.getenv('REEL_MAX_SECONDS','59'))
+            plan, clip_texts = build_topic_plan(
+                VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration,
+                uploaded_history, GEMINI_KEY, max_seconds=max_seconds)
+            # Save source-aligned full transcript and word timing once; subsequent
+            # preview/approval/scheduled uploads reuse it instead of running ASR.
+            store_clip_transcripts(plan, clip_texts, timed_cues)
+            failed_seo = []
+            for clip in plan['clips']:
+                try:
+                    meta = generate_reel_metadata(
+                        timed_cues, clip['start_time'],clip['end_time'],
+                        clip['title'], GEMINI_KEY, clip_number=clip['serial'])
+                    clip['title'] = meta['title']
+                    clip['reel_title'] = meta['title']
+                    clip['reel_description'] = meta['description']
+                    clip['reel_tags_string'] = meta['tags_string']
+                    clip['reel_language'] = meta['language']
+                    clip['reel_seo_version'] = 3
+                    clip['seo_ready'] = True
+                except Exception as exc:
+                    failed_seo.append(clip['id'])
+                    clip['seo_ready'] = False
+                    print(f"REEL_SEO_PENDING: {clip['id']}; {type(exc).__name__}")
+            # The first menu shows topic titles immediately. Never create and
+            # send an unwanted preview before the owner selects it.
             save_clip_plan(plan)
-            if not plan['clips']:
-                send_telegram('لا توجد ريلز متبقية غير منشورة بصوت كافٍ؛ '
-                              f"تم استبعاد {len(published_windows(uploaded_history))} مقطع منشور مسبقًا.")
-                raise SystemExit(0)
+            preview = '\n'.join(
+                f"{c['id']}. {c['title']} — {int(c['end_time']-c['start_time'])}ث "
+                f"({c['start_time']:.0f}–{c['end_time']:.0f})"
+                for c in plan['clips'][:8])
             send_telegram(
-                f"تم تحليل الفيديو بالكامل. الريلز المتبقية: {len(plan['clips'])}. "
-                f"المستبعدة لأنها منشورة: {len(published_windows(uploaded_history))}. "
-                "تقدر تطلب معاينة الكل أو معاينة مقاطع محددة من نفس القائمة. "
-                "هتوصلك معاينة مبدئية واحدة تلقائيًا دون نشر.")
-            selected_id = plan.get('recommended_clip_id', plan['clips'][0]['id'])
-            prepare_selected_previews(plan, [selected_id], plan_reference(plan))
-            # The remaining proposals are still available from the existing menu,
-            # but do not require any extra step for the recommended reel.
+                f"✅ تم تفريغ الفيديو وتقسيمه إلى {len(plan['clips'])} موضوع مكتمل.\n"
+                f"{preview}\n"
+                + (f"⚠️ بيانات بعض الريلز تحتاج إعادة توليد: {failed_seo}.\n" if failed_seo else "")
+                + "افتح القائمة لمراجعة النصوص والعناوين واختيار النشر أو الجدولة. "
+                  "لا يوجد نشر تلقائي ولا معاينة إجبارية.",
+                reply_markup={'inline_keyboard': [[{
+                    'text':'🎛️ فتح قائمة الريلز',
+                    'callback_data':f"p:menu:{_ui_fingerprint(plan)}"
+                }]]})
             raise SystemExit(0)
 
         # /seo is the only command that requests descriptive metadata.

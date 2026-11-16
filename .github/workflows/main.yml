@@ -114,7 +114,7 @@ jobs:
           PY
 
       - name: تثبيت خط Mikhak Black للمعاينة فقط
-        if: ${{ github.event.client_payload.agent_action == 'preview' || (github.event.client_payload.agent_action || 'prepare') == 'prepare' }}
+        if: ${{ github.event.client_payload.agent_action == 'preview' || github.event.client_payload.agent_action == 'direct_publish' || (github.event.client_payload.agent_action || 'prepare') == 'prepare' }}
         run: python scripts/install_mikhak.py
 
       - name: تشغيل الوكيل الذكي
@@ -123,6 +123,7 @@ jobs:
           AGENT_ACTION: ${{ github.event.client_payload.agent_action || 'prepare' }}
           CLIP_IDS: ${{ github.event.client_payload.clip_ids || '' }}
           CLIP_PLAN_REF: ${{ github.event.client_payload.clip_plan_ref || '' }}
+          REEL_MAX_SECONDS: ${{ github.event.client_payload.max_seconds || '59' }}
 
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

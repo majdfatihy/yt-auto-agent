@@ -6,3 +6,6 @@ keep_vars = true
 [[kv_namespaces]]
 binding = "BOT_STATE"
 id = "d075aed8f2884a4891eea3fbeef8d710"
+
+[triggers]
+crons = [ "* * * * *" ]
