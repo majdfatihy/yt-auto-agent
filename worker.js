@@ -582,7 +582,7 @@ async function handleCallback(env, cb) {
         return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة', cb.message?.message_id);
       if (pieces[1] === 'prepare' || pieces[1] === 'seo') {
         if (!source.video_url) throw Error('أرسل رابط فيديو أولًا.');
-        if (['publish_queued', 'publishing'].includes(plan?.status))
+        if ((['publish_queued', 'publishing'].includes(plan?.status) || activeJobs(plan)))
           throw Error('عملية نشر قيد المتابعة. لا يمكن تغيير المصدر.');
         if (pieces[1] === 'prepare') {
           await clearPlan(env);
@@ -592,14 +592,14 @@ async function handleCallback(env, cb) {
           '⏳ بدأت معالجة بيانات السيو.', await controls(env, source, null));
       }
       if (pieces[1] === 'cancel') {
-        if (['publish_queued', 'publishing'].includes(plan?.status))
+        if ((['publish_queued', 'publishing'].includes(plan?.status) || activeJobs(plan)))
           throw Error('النشر جارٍ أو يحتاج مراجعة؛ الإلغاء غير متاح.');
         return send(env, 'هل تريد حذف المصدر والاقتراحات؟',
           inline([[{text:'نعم، إلغاء',callback_data:'s:confirmcancel:'+pieces[2]}],
                   [{text:'رجوع',callback_data:'s:menu:'+pieces[2]}]]));
       }
       if (pieces[1] === 'confirmcancel') {
-        if (['publish_queued', 'publishing'].includes(plan?.status))
+        if ((['publish_queued', 'publishing'].includes(plan?.status) || activeJobs(plan)))
           throw Error('النشر قيد التنفيذ، لا يمكن الإلغاء.');
         await clearPlan(env);
         await env.BOT_STATE.put(key, '{}');
@@ -898,18 +898,157 @@ async function processUpdate(env, update) {
   }
   if (cmd === '/cancel') {
     const existing = await readPlan(env);
-    if (['publish_queued', 'publishing'].includes(existing?.status))
+    if ((['publish_queued', 'publishing'].includes(existing?.status) || activeJobs(existing)))
       return send(env, 'لا يمكن إلغاء نشر بدأ بالفعل. راجع /status وGitHub Actions.');
     await clearPlan(env);
     await env.BOT_STATE.put(key, '{}');
     return send(env, 'تم إلغاء المصدر والاقتراحات. لم يُنشر شيء.');
   }
+
+  if(cmd==='/settings') {
+    const plan=await readPlan(env);
+    if(!topicPlan(plan)||!sameSource(source,plan))
+      return send(env,'إعدادات افتراضية: /captions on|off، /blur auto|on|off، '+
+        '/privacy public|unlisted|private، /duration 30|59|180. ثم أرسل رابط الفيديو.');
+    return settingsMenu(env,plan);
+  }
+  if(['/captions','/blur','/privacy','/duration'].includes(cmd)) {
+    const args=text.slice(text.split(/\s+/)[0].length).trim().split(/\s+/);
+    const key=cmd==='/captions'?'captions':cmd==='/duration'?'max_seconds':cmd.slice(1);
+    const hasId=args.length===2&&/^\d+$/.test(args[0]);
+    const raw=hasId?args[1]:args[0];
+    const allowed=key==='captions'?['on','off']:
+      key==='blur'?['auto','on','off']:
+      key==='privacy'?['public','private','unlisted']:['30','59','180'];
+    if(!allowed.includes(raw)||args.length!==(hasId?2:1))
+      return send(env,'صيغة الإعداد: '+cmd+' '+(allowed.join('|'))+
+        '، أو '+cmd+' رقم_الريلز القيمة.');
+    const value=key==='captions'?raw==='on':key==='max_seconds'?Number(raw):raw;
+    if(!hasId) {
+      await updatePreference(env,key,value);
+      return send(env,'✅ تم حفظ إعداد '+key+' افتراضيًا: '+raw);
+    }
+    const p=await readPlan(env),id=Number(args[0]);
+    if(!topicPlan(p)||!sameSource(source,p))return send(env,'لا توجد قائمة ريلز نشطة.');
+    if(!p.clips.some(c=>c.id===id)||clipJob(p,id))
+      return send(env,'هذا الريلز غير موجود أو بدأ نشره/جدولته.');
+    p.clip_settings=p.clip_settings||{};
+    p.clip_settings[String(id)]={...(p.clip_settings[String(id)]||{}),[key]:value};
+    await writePlan(env,p);
+    return send(env,'✅ تم ضبط '+key+' للريلز '+id+' على '+raw+'، دون تغيير بقية المقاطع.');
+  }
+  if(cmd==='/title'||cmd==='/description'||cmd==='/tags') {
+    const p=await readPlan(env);
+    if(!topicPlan(p)||!sameSource(source,p))return send(env,'لا توجد ريلز قابلة لتعديل البيانات.');
+    const match=text.match(/^\/(?:title|description|tags)(?:@\w+)?\s+(\d{1,3})\s+([\s\S]+)$/i);
+    if(!match)return send(env,'الصيغة: '+cmd+' رقم_الريلز النص الجديد');
+    const id=Number(match[1]),clip=p.clips.find(c=>c.id===id);
+    if(!clip||clipJob(p,id))return send(env,'هذا المقطع منشور أو مجدول، ولا يُعدل من هنا.');
+    const value=match[2].trim();
+    if(cmd==='/title') {
+      const old=clip.reel_title||clip.title;
+      const suffix=old.match(/( #[\p{L}\p{N}_]+ \d+)$/u)?.[1]||' '+clip.serial;
+      const base=value.replace(/( #[\p{L}\p{N}_]+ \d+)$/u,'').trim();
+      const title=value.endsWith(' '+clip.serial)&&value.includes('#')?value:base+suffix;
+      if(title.length>100||base.length<8||/https?:\/\//i.test(title)||!title.endsWith(' '+clip.serial))
+        return send(env,'العنوان غير صالح: من 8 إلى 100 حرف، والرقم التسلسلي يجب أن يظل في نهايته.');
+      clip.title=title;clip.reel_title=title;clip.title_approved=false;
+    } else if(cmd==='/description') {
+      const lines=value.split('|').map(x=>x.trim()).filter(Boolean);
+      if(lines.length!==3||lines.some(x=>x.length<12))
+        return send(env,'الوصف: 3 جمل مفصولة بعلامة | في رسالة واحدة.');
+      const hashtags=(clip.reel_description||'').split('\n').at(-1);
+      clip.reel_description=lines.join('\n')+'\n'+hashtags;
+    } else {
+      if(value.length>500||value.length<5||value.includes('#')||!value.includes(','))
+        return send(env,'العلامات لا تتعدى 500 حرف؛ افصل بينها بفاصلة إنجليزية واحدة ,');
+      clip.reel_tags_string=value;
+    }
+    await writePlan(env,p);
+    return send(env,'✅ تم تعديل بيانات الريلز '+id+' فقط. يمكنك مراجعتها في /menu.');
+  }
+  if(cmd==='/pause'||cmd==='/resume'||cmd==='/stop'||cmd==='/reschedule') {
+    const p=await readPlan(env);
+    if(!topicPlan(p)||!sameSource(source,p))return send(env,'لا يوجد جدول لهذا المصدر.');
+    if(cmd==='/reschedule') {
+      const match=text.match(/^\/reschedule\s+(\d+)\s+(\d{4}-\d\d-\d\d)\s+(\d\d:\d\d)$/);
+      if(!match)return send(env,'اكتب: /reschedule 3 2026-11-23 18:00');
+      const id=Number(match[1]),job=p.clip_jobs?.[String(id)];
+      if(!job||job.state!=='pending')return send(env,'يمكن تعديل موعد ريلز مجدول لم يبدأ فقط.');
+      job.due_utc=cairoToUtc(match[2]+' '+match[3]);
+      await writePlan(env,p);
+      return send(env,'✅ موعد ريلز '+id+' الجديد: '+cairoTime(job.due_utc));
+    }
+    if(cmd==='/stop') {
+      let n=0;
+      for(const job of Object.values(p.clip_jobs||{}))
+        if(job.state==='pending'){job.state='cancelled';n++;}
+      delete p.schedule_draft;
+      p.schedule_paused=true;
+      await writePlan(env,p);
+      return send(env,'⛔ تم إلغاء '+n+' رفع مجدول لم يبدأ. أي رفع جارٍ لا يمكن إلغاؤه.');
+    }
+    p.schedule_paused=cmd==='/pause';
+    await writePlan(env,p);
+    return send(env,p.schedule_paused?'⏸️ أوقفت بدء الرفع المجدول.':'▶️ استأنفت الجدولة.');
+  }
+  if(cmd==='/publishnow') {
+    const p=await readPlan(env);
+    if(!topicPlan(p)||!sameSource(source,p))
+      return send(env,'لا توجد قائمة جاهزة للنشر المباشر.');
+    const raw=text.slice(text.split(/\s+/)[0].length).trim();
+    const ids=raw==='all'?openClips(p).map(c=>c.id):
+      raw?parseChoices(raw,p):selectedOpen(p,await selection(env,p));
+    try {return await queueTopicJobs(env,source,p,ids);}
+    catch(e){return send(env,'⚠️ '+String(e.message||e));}
+  }
+
   if (cmd === '/schedule') {
     const plan = await readPlan(env);
     if (!plan || !sameSource(source, plan) ||
         !['awaiting_selection','previewed_awaiting_approval'].includes(plan.status))
       return send(env, 'لا توجد ريلز جاهزة لضبط موعد النشر. أرسل الرابط أولًا.');
     const args = text.slice(text.indexOf(' ') + 1).trim();
+    if(topicPlan(plan)) {
+      if(args.toLowerCase()==='off'){
+        delete plan.schedule_draft;
+        await writePlan(env,plan);
+        return send(env,'تم إلغاء جدول المسودة دون المساس بريلز منشور أو مجدول.');
+      }
+      try {
+        const individual=args.match(/^(\d{1,3})\s+(\d{4}-\d\d-\d\d)\s+(\d\d:\d\d)$/);
+        const batch=args.match(/^(\d{4}-\d\d-\d\d)\s+(\d\d:\d\d)\s+(\d{1,5}[mhd]?)$/i);
+        if(!individual&&!batch)throw Error(
+          'للجميع: /schedule 2026-11-22 18:00 10m (أو 1h أو 1d)\n' +
+          'لفردي: /schedule 3 2026-11-22 19:00');
+        const chosen=selectedOpen(plan,await selection(env,plan));
+        const ids=individual?[Number(individual[1])]:
+          chosen.length?chosen:openClips(plan).map(c=>c.id);
+        if(!ids.length||!ids.every(id=>openClips(plan).some(c=>c.id===id)))
+          throw Error('حدد مقاطع غير منشورة أو غير مجدولة فقط.');
+        const items=individual?{...(plan.schedule_draft?.items||{})}:{};
+        if(individual){
+          items[String(ids[0])]=cairoToUtc(individual[2]+' '+individual[3]);
+        } else {
+          const first=Date.parse(cairoToUtc(batch[1]+' '+batch[2]));
+          const spacing=spacingMinutes(batch[3]);
+          const ordered=[...ids].sort((a,b)=>
+            plan.clips.find(c=>c.id===a).start_time-
+            plan.clips.find(c=>c.id===b).start_time);
+          for(let i=0;i<ordered.length;i++)
+            items[String(ordered[i])]=new Date(first+i*spacing*60000).toISOString();
+        }
+        plan.schedule_draft={ids:Object.keys(items).map(Number),items};
+        await writePlan(env,plan);
+        const summary=plan.schedule_draft.ids.sort((a,b)=>a-b).map(id=>
+          'ريلز '+id+': '+cairoTime(items[String(id)])).join('\n');
+        return send(env,'📅 معاينة جدول الرفع العلني/الخاص بتوقيت مصر:\n'+summary+
+          '\nلن يبدأ أي رفع حتى تعتمد الجدول.',
+          inline([[{text:'✅ اعتماد وتنفيذ الجدولة',
+            callback_data:'p:startschedule:'+await planKey(plan)}],
+            [{text:'↩️ القائمة',callback_data:'p:menu:'+await planKey(plan)}]]));
+      } catch(e){return send(env,'⚠️ '+String(e.message||e));}
+    }
     if (args.toLowerCase() === 'off') {
       delete plan.schedule;
       await writePlan(env, plan);
@@ -1011,7 +1150,7 @@ async function processUpdate(env, update) {
     if (media && (media.file_size || 0) > MAX_MP4) return send(env, 'ملف MP4 أكبر من 20MB.');
     if (cmd === '/prepare') {
       const existing = await readPlan(env);
-      if (['publish_queued', 'publishing'].includes(existing?.status))
+      if ((['publish_queued', 'publishing'].includes(existing?.status) || activeJobs(existing)))
         return send(env, 'هناك نشر قيد التنفيذ؛ لا يمكن تغيير المصدر الآن.');
       await clearPlan(env);
       await env.BOT_STATE.put(key, JSON.stringify(selected));
@@ -1022,7 +1161,7 @@ async function processUpdate(env, update) {
   }
   if (link) {
     const existing = await readPlan(env);
-    if (['publish_queued', 'publishing'].includes(existing?.status))
+    if ((['publish_queued', 'publishing'].includes(existing?.status) || activeJobs(existing)))
       return send(env, 'هناك نشر قيد التنفيذ؛ لا يمكن تغيير المصدر الآن.');
     if (media && (media.file_size || 0) > MAX_MP4) return send(env, 'ملف MP4 أكبر من حد التنزيل 20MB.');
     const nextSource = {video_url: link, telegram_file_id: media?.file_id || ''};
@@ -1032,7 +1171,7 @@ async function processUpdate(env, update) {
       return send(env, 'الرابط ده بيتم تجهيزه بالفعل. المعاينة هتوصلك تلقائيًا؛ مفيش حاجة تانية مطلوبة.');
     if (sameSource(nextSource, existing || {}) &&
         ['awaiting_selection', 'previewed_awaiting_approval', 'approved'].includes(existing?.status))
-      return send(env, 'الفيديو ده تم تحليله بالفعل. افتح /menu لعرض آخر معاينة أو الخيارات.');
+      return showMenu(env,source,existing,'🎬 الفيديو ده محلل بالفعل؛ القائمة جاهزة.');
     await clearPlan(env);
     await env.BOT_STATE.put(key, JSON.stringify({
       ...nextSource, auto_prepare_requested_at: Date.now()
