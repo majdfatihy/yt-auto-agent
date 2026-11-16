@@ -15,20 +15,17 @@ make_button = namespace['_preview_keyboard']
 PLAN = {'clips': [{'id': 1}], 'created_utc': '2026-11-16T00:00:00Z'}
 
 class PreviewButtonRolloutTests(unittest.TestCase):
-    def test_default_button_is_compatible_with_old_live_worker(self):
-        with patch.dict(os.environ, {'TELEGRAM_ONE_TAP_ENABLED': 'false',
-                                     'GITHUB_RUN_ID': '34567'}):
-            result = make_button(PLAN, [1])
-        action = result['inline_keyboard'][0][0]['callback_data']
-        self.assertEqual(action, 'p:approve:123abc:34567')
-        self.assertNotIn('approvepublish', action)
-
-    def test_new_callback_only_when_cloudflare_confirmed(self):
-        with patch.dict(os.environ, {'TELEGRAM_ONE_TAP_ENABLED': 'true',
-                                     'GITHUB_RUN_ID': '34567'}):
-            result = make_button(PLAN, [1])
-        action = result['inline_keyboard'][0][0]['callback_data']
-        self.assertEqual(action, 'p:approvepublish:123abc:34567')
+    def test_approval_always_dispatches_one_tap_publishing(self):
+        # Production Cloudflare Worker supports direct approval. A stale GitHub
+        # flag must not force the old two-step 'approve then confirm' flow.
+        for enabled in ('true', 'false', ''):
+            with self.subTest(enabled=enabled), patch.dict(os.environ, {
+                    'TELEGRAM_ONE_TAP_ENABLED': enabled,
+                    'GITHUB_RUN_ID': '34567'}):
+                result = make_button(PLAN, [1])
+            action = result['inline_keyboard'][0][0]['callback_data']
+            self.assertEqual(action, 'p:approvepublish:123abc:34567')
+            self.assertIn('اعتماد ونشر', result['inline_keyboard'][0][0]['text'])
 
 if __name__ == '__main__':
     unittest.main()

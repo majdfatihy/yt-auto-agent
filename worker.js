@@ -179,7 +179,7 @@ async function controls(env, source, plan) {
                   callback_data: 'p:approvepublish:' + hash + ':' + plan.preview_run_id}]);
     }
   } else if (plan.status === 'approved') {
-    rows.push([{text: '🔒 تأكيد النشر الخاص', callback_data: 'p:publish:' + hash}]);
+    rows.push([{text: '✅ بدء نشر المقطع المعتمد فورًا', callback_data: 'p:publish:' + hash}]);
   } else if (plan.status === 'published' && continuableClips(plan).length) {
     rows.push([{text: '🎬 أكمل الريلز المتبقية من نفس الفيديو',
                 callback_data: 'p:continue:' + hash}]);
@@ -195,7 +195,7 @@ async function controls(env, source, plan) {
 }
 const LABELS = {
   awaiting_selection: 'اختر المقاطع ثم اضغط معاينة',
-  previewed_awaiting_approval: 'المعاينة جاهزة — اضغط موافق للنشر الخاص بعد مراجعتها',
+  previewed_awaiting_approval: 'المعاينة جاهزة — اعتماد واحد ينفذ النشر مباشرة',
   approved: 'معتمد، ولم يُنشر بعد',
   publish_queued: 'طلب النشر قيد التنفيذ',
   publishing: 'النشر قيد التنفيذ أو بحاجة لمراجعة نتيجة آخر تشغيل',
@@ -238,7 +238,7 @@ async function publishPlan(env, source, plan) {
     throw err;
   }
   return send(env, 'تم طلب نشر المقاطع: ' + plan.approved_ids.join(', ') +
-    ' بوضع خاص فقط. النشر لم يكتمل بعد.', await controls(env, source, plan));
+    ' إلى يوتيوب فورًا. نتيجة الرفع ستصل عند اكتمال GitHub Actions؛ لن يُعاد إرسال نفس الطلب.', await controls(env, source, plan));
 }
 async function retryOauth(env, source, plan) {
   if (!sameSource(source, plan) || !retriableAuthFailure(plan) ||
@@ -393,15 +393,11 @@ async function handleCallback(env, cb) {
       plan.approved_ids = ids;
       plan.approval_utc = new Date().toISOString();
       await writePlan(env, plan);
-      return showMenu(env, source, plan, '✅ تم اعتماد المقاطع ' + ids.join('، ') + '. لم تُنشر.', cb.message?.message_id);
+      return publishPlan(env, source, plan);
     }
     if (pieces[1] === 'publish') {
       if (plan.status !== 'approved') throw Error('لا توجد معاينة معتمدة.');
-      return editOrSend(env, cb.message?.message_id,
-        'تأكيد نهائي: نشر المقاطع ' + plan.approved_ids.join('، ') +
-        ' على يوتيوب بوضع خاص؟',
-        inline([[{text:'نعم، انشر خاص',callback_data:'p:confirm:'+pieces[2]}],
-                [{text:'إلغاء القرار',callback_data:'p:menu:'+pieces[2]}]]));
+      return publishPlan(env, source, plan);
     }
     if (pieces[1] === 'confirm') return publishPlan(env, source, plan);
     if (pieces[1] === 'retry') {
@@ -556,6 +552,13 @@ async function processUpdate(env, update) {
     try {
       const plan = await readPlan(env);
       if (!plan) throw Error('لا يوجد فيديو محفوظ؛ أرسل رابط الفيديو.');
+      if (!sameSource(source, plan))
+        throw Error('القائمة لا تطابق الفيديو المحفوظ.');
+      if (['publish_queued', 'publishing', 'approved'].includes(plan.status))
+        return showMenu(env, source, plan,
+          'المقطع المعتمد قيد الرفع الآن؛ لا تبدأ عملية ثانية لنفس المعاينة. '
+          + 'عند اكتمال الرفع ستظهر بقية الريلز تلقائيًا. '
+          + 'لو استمرت الحالة بعد انتهاء GitHub Actions راجع /status.');
       if (plan.status === 'awaiting_selection' ||
           plan.status === 'previewed_awaiting_approval')
         return showMenu(env, source, plan, '🎬 الريلز المتبقية من نفس الفيديو.');
