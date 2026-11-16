@@ -27,8 +27,9 @@ await sendMessage('/approve 2'); assert.equal(plan.status,'previewed_awaiting_ap
 artifactsReady=false;
 await sendMessage('/approve 1');assert.equal(plan.status,'previewed_awaiting_approval');
 artifactsReady=true;
-await sendMessage('/approve ١');assert.deepEqual(plan.approved_ids,[1]);assert.equal(plan.status,'approved');
-await sendMessage('/publish'); assert.equal(plan.status,'publish_queued');assert.equal(dispatched.length,1);
+await sendMessage('/approve ١');assert.deepEqual(plan.approved_ids,[1]);assert.equal(plan.status,'publish_queued');
+assert.equal(dispatched.length,1,'approve immediately dispatches private YouTube upload');
+await sendMessage('/publish');assert.equal(dispatched.length,1);
 assert.equal(dispatched[0].client_payload.agent_action,'publish');
 assert.equal(dispatched[0].client_payload.clip_ids,'1');
 assert.equal(dispatched[0].client_payload.clip_plan_ref,base.created_utc);
