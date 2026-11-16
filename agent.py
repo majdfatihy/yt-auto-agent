@@ -12,6 +12,8 @@ import hashlib
 from datetime import datetime, timezone
 from approved_publish import publish_approved_clips
 from reel_metadata import generate_reel_metadata, parse_youtube_tags
+from reel_full_plan import build_remaining_plan
+from reel_history import load_history, has_overlap, published_windows
 from source_video_info import original_youtube_id, read_source_facts, preview_fact_lines
 from text_ai import generate_json
 from youtube_source import download_youtube_video
@@ -545,9 +547,13 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         streams = json.loads(dimensions.stdout).get('streams', [])
         if len(streams) != 1 or streams[0].get('width') != 1080 or streams[0].get('height') != 1920:
             raise RuntimeError('REEL_DIMENSIONS_INVALID: expected 1080x1920')
+        if has_overlap(load_history(VIDEO_URL), clip['start_time'], clip['end_time']):
+            raise RuntimeError('REEL_ALREADY_UPLOADED: معاينة المقطع متداخلة مع ريلز منشور من نفس المصدر')
         reel_meta = generate_reel_metadata(
             preview_cues, clip['start_time'], clip['end_time'],
-            clip['title'], GEMINI_KEY)
+            clip['title'], GEMINI_KEY, clip_number=clip.get('serial', clip['id']))
+        reel_meta['recording_date'] = (source_facts or {}).get('source_recorded_at')
+        reel_meta['source_published_at'] = (source_facts or {}).get('source_published_at')
         preview_metadata[str(clip_id)] = reel_meta
         # Reuse input.mp4 in this same runner for any subsequent selection.
         if Path('input.mp4').is_file():
@@ -557,14 +563,10 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         send_telegram_video(captioned_preview,
                             f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
         send_telegram(
-            f"بيانات الريلز {clip_id} قبل الاعتماد:\n"
-            f"العنوان الأساسي للنشر: {reel_meta['title']}\n\n"
-            "3 عناوين طويلة مقترحة:\n" +
-            "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['long_titles'], 1)) +
-            "\n\n3 عناوين قصيرة مقترحة:\n" +
-            "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['short_titles'], 1)) +
-            f"\n\nالوصف والهاشتاغات (بلوك واحد):\n{reel_meta['description']}\n\n"
-            f"الكلمات المفتاحية ({len(reel_meta['tags_string'])} حرف):\n"
+            f"ريلز {clip.get('serial', clip_id)} — بيانات النشر قبل الاعتماد:\n"
+            f"العنوان ({len(reel_meta['title'])}/100): {reel_meta['title']}\n\n"
+            f"الوصف والهاشتاغات:\n{reel_meta['description']}\n\n"
+            f"كلمات يوتيوب ({len(reel_meta['tags_string'])}/500 حرف):\n"
             f"{reel_meta['tags_string']}\n\n"
             + preview_fact_lines(source_facts))
         stored = preview_dir / f'clip-{clip_id}.mp4'
@@ -644,8 +646,19 @@ if __name__ == "__main__":
                 send_telegram('⛔ لا يمكن اقتراح قص موثوق بدون تفريغ مؤقت للكلام. أرسل MP4 مع رابطه.')
                 raise SystemExit(0)
             duration = source_duration(local_source or None, timed_cues)
-            plan = build_clip_plan(VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, GEMINI_KEY)
+            uploaded_history = load_history(VIDEO_URL)
+            plan = build_remaining_plan(
+                VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, uploaded_history)
             save_clip_plan(plan)
+            if not plan['clips']:
+                send_telegram('لا توجد ريلز متبقية غير منشورة بصوت كافٍ؛ '
+                              f"تم استبعاد {len(published_windows(uploaded_history))} مقطع منشور مسبقًا.")
+                raise SystemExit(0)
+            send_telegram(
+                f"تم تحليل الفيديو بالكامل. الريلز المتبقية: {len(plan['clips'])}. "
+                f"المستبعدة لأنها منشورة: {len(published_windows(uploaded_history))}. "
+                "تقدر تطلب معاينة الكل أو معاينة مقاطع محددة من نفس القائمة. "
+                "هتوصلك معاينة مبدئية واحدة تلقائيًا دون نشر.")
             selected_id = plan.get('recommended_clip_id', plan['clips'][0]['id'])
             prepare_selected_previews(plan, [selected_id], plan_reference(plan))
             # The remaining proposals are still available from the existing menu,
