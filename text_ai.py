@@ -34,7 +34,7 @@ def _groq_json(model, prompt, key):
                   {"role": "user", "content": prompt}
               ],
               "response_format": {"type": "json_object"},
-              "max_completion_tokens": 1600},
+              "max_completion_tokens": 3400},
         timeout=(10, 60))
     response.raise_for_status()
     body = response.json()
