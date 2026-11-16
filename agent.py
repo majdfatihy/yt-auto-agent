@@ -626,8 +626,55 @@ if __name__ == "__main__":
         if not VIDEO_URL:
             raise ValueError("لم يتم إدخال رابط الفيديو (VIDEO_URL فارغ)!")
 
-        if AGENT_ACTION not in ('seo', 'prepare', 'publish', 'preview', 'direct_publish'):
+        if AGENT_ACTION not in ('seo', 'prepare', 'publish', 'preview', 'direct_publish', 'metadata'):
             raise ValueError('Unsupported AGENT_ACTION; refusing to publish')
+        if AGENT_ACTION == 'metadata':
+            plan = load_clip_plan()
+            if (plan_reference(plan) != os.getenv('CLIP_PLAN_REF', '').strip() or
+                    plan.get('method') != 'topic_transcript_ai' or
+                    plan.get('video_url') != VIDEO_URL or
+                    plan.get('telegram_file_id', '') != TELEGRAM_FILE_ID):
+                raise RuntimeError('METADATA_PLAN_CHANGED')
+            requested = [int(x) for x in os.getenv('CLIP_IDS','').split(',')
+                         if x.strip().isdigit()]
+            if not requested or len(requested) != len(set(requested)):
+                raise RuntimeError('METADATA_IDS_INVALID')
+            cues = load_clip_transcripts(plan).get('cues', [])
+            if not cues:
+                raise RuntimeError('METADATA_TRANSCRIPT_UNAVAILABLE')
+            fixed, failed = [], []
+            for clip in plan['clips']:
+                if clip['id'] not in requested:
+                    continue
+                if clip.get('seo_ready'):
+                    continue
+                if (plan.get('clip_jobs') or {}).get(str(clip['id'])):
+                    continue
+                try:
+                    meta = generate_reel_metadata(
+                        cues, clip['start_time'],clip['end_time'],
+                        clip['title'], GEMINI_KEY,clip_number=clip['serial'])
+                    clip['title'] = meta['title']
+                    clip['reel_title'] = meta['title']
+                    clip['reel_description'] = meta['description']
+                    clip['reel_tags_string'] = meta['tags_string']
+                    clip['reel_language'] = meta['language']
+                    clip['reel_seo_version'] = 3
+                    clip['seo_ready'] = True
+                    fixed.append(clip['id'])
+                except Exception as error:
+                    failed.append(clip['id'])
+                    print('METADATA_RETRY_FAILED: ' + type(error).__name__)
+            save_clip_plan(plan)
+            send_telegram(
+                f'✅ تمت إعادة تجهيز SEO للمقاطع: {fixed}. '
+                f'ما زالت تحتاج مراجعة: {failed}. افتح القائمة.',
+                reply_markup={'inline_keyboard': [[{
+                    'text':'🎛️ فتح القائمة',
+                    'callback_data':f"p:menu:{_ui_fingerprint(plan)}"
+                }]]})
+            raise SystemExit(0)
+
         if AGENT_ACTION == 'direct_publish':
             try:
                 publish_direct(
