@@ -32,6 +32,7 @@ from transcription_pipeline import obtain_timed_transcript, cues_to_text, clip_h
 from captions_renderer import burn_captions
 from caption_revisions import apply_approved_edits
 from transcript_proofreader import proofread_timed_cues, preserve_approved_word_edits
+from reel_preview_settings import resolve_preview_settings
 from clip_planner import (build_clip_plan, format_clip_plan, save_clip_plan, source_duration,
                           load_clip_plan, plan_reference, parse_clip_choices, record_preview_result)
 from google.oauth2.credentials import Credentials
@@ -522,11 +523,13 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
     preview_cues = None  # One local-source transcription for all chosen clips.
     preview_metadata = {}
     source_facts = None
+    effective_settings = resolve_preview_settings(
+        plan, chosen_ids, os.getenv('CLIP_OPTIONS_JSON', ''))
     for clip_id in chosen_ids:
         if plan_reference(load_clip_plan()) != expected_ref:
             raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
         clip = clips_by_id[clip_id]
-        settings = (plan.get('clip_settings') or {}).get(str(clip_id), {})
+        settings = effective_settings[clip_id]
         download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'],
                                      blur_mode=settings.get('blur', 'auto'))
         if preview_cues is None:
@@ -600,7 +603,7 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         stamp_start = f"{clip['start_time']:.1f}"
         stamp_end = f"{clip['end_time']:.1f}"
         send_telegram_video(captioned_preview,
-                            f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
+                            f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nخصوصية الرفع: {settings['privacy']}\nلم يُنشر الفيديو")
         send_telegram(
             format_reel_details(clip, reel_meta, source_facts, preview_fact_lines),
             parse_mode="HTML")
