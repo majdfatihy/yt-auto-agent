@@ -41,3 +41,34 @@ jobs:
         run: |
           npx --yes wrangler@4 deploy --config wrangler.toml
           echo 'LIVE_WORKER_DEPLOYED: existing Telegram webhook updated.'
+      - name: Enable one-tap preview callback after a verified deploy
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+          token = os.getenv('GH_PAT', '')
+          if not token:
+              print('ONE_TAP_FLAG_UNCHANGED: GH_PAT not configured; old approval remains available.')
+              raise SystemExit(0)
+          root = f"https://api.github.com/repos/{os.environ['REPO']}/actions/variables"
+          headers = {'Authorization': f'Bearer {token}',
+                     'Accept': 'application/vnd.github+json',
+                     'X-GitHub-Api-Version': '2022-11-28'}
+          data = {'name': 'TELEGRAM_ONE_TAP_ENABLED', 'value': 'true'}
+          check = requests.get(root + '/' + data['name'], headers=headers, timeout=20)
+          if check.status_code == 404:
+              result = requests.post(root, headers=headers, json=data, timeout=20)
+              expected = 201
+          else:
+              check.raise_for_status()
+              result = requests.patch(root + '/' + data['name'], headers=headers,
+                                      json={'value': 'true'}, timeout=20)
+              expected = 204
+          if result.status_code != expected:
+              raise SystemExit('ONE_TAP_FLAG_UPDATE_FAILED_HTTP_' + str(result.status_code))
+          print('ONE_TAP_FLAG_ENABLED: live Cloudflare deployment confirmed.')
+          PY
