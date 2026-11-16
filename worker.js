@@ -507,11 +507,17 @@ async function processUpdate(env, update) {
       return send(env, 'هناك نشر قيد التنفيذ؛ لا يمكن تغيير المصدر الآن.');
     if (media && (media.file_size || 0) > MAX_MP4) return send(env, 'ملف MP4 أكبر من حد التنزيل 20MB.');
     const nextSource = {video_url: link, telegram_file_id: media?.file_id || ''};
+    if (sameSource(nextSource, source) && !existing?.clips?.length &&
+        Number(source.auto_prepare_requested_at) > 0 &&
+        Date.now() - Number(source.auto_prepare_requested_at) < 10 * 60 * 1000)
+      return send(env, 'الرابط ده بيتم تجهيزه بالفعل. المعاينة هتوصلك تلقائيًا؛ مفيش حاجة تانية مطلوبة.');
     if (sameSource(nextSource, existing || {}) &&
         ['awaiting_selection', 'previewed_awaiting_approval', 'approved'].includes(existing?.status))
       return send(env, 'الفيديو ده تم تحليله بالفعل. افتح /menu لعرض آخر معاينة أو الخيارات.');
     await clearPlan(env);
-    await env.BOT_STATE.put(key, JSON.stringify(nextSource));
+    await env.BOT_STATE.put(key, JSON.stringify({
+      ...nextSource, auto_prepare_requested_at: Date.now()
+    }));
     await dispatch(env, nextSource, 'prepare');
     return send(env, 'وصل الرابط. هيتم اختيار أفضل مقطع وتجهيز الفيديو وSEO تلقائيًا. مفيش نشر قبل موافقتك.');
   }
