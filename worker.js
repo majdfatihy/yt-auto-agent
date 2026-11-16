@@ -130,8 +130,8 @@ async function controls(env, source, plan) {
     rows.push([{text: '🎞️ معاينة المقاطع المختارة (' + chosen.length + ')',
                 callback_data: 'p:preview:' + hash}]);
     if (plan.status === 'previewed_awaiting_approval' && previewIds(plan).length) {
-      rows.push([{text: '✅ اعتماد المعاينة ' + previewIds(plan).join('،'),
-                  callback_data: 'p:approve:' + hash + ':' + plan.preview_run_id}]);
+      rows.push([{text: '✅ موافق: اعتماد ونشر خاص للمقطع ' + previewIds(plan).join('،'),
+                  callback_data: 'p:approvepublish:' + hash + ':' + plan.preview_run_id}]);
     }
   } else if (plan.status === 'approved') {
     rows.push([{text: '🔒 تأكيد النشر الخاص', callback_data: 'p:publish:' + hash}]);
@@ -147,7 +147,7 @@ async function controls(env, source, plan) {
 }
 const LABELS = {
   awaiting_selection: 'اختر المقاطع ثم اضغط معاينة',
-  previewed_awaiting_approval: 'المعاينة جاهزة — اختار اعتماد المقطع الصحيح',
+  previewed_awaiting_approval: 'المعاينة جاهزة — اضغط موافق للنشر الخاص بعد مراجعتها',
   approved: 'معتمد، ولم يُنشر بعد',
   publish_queued: 'طلب النشر قيد التنفيذ',
   publishing: 'النشر قيد التنفيذ أو بحاجة لمراجعة نتيجة آخر تشغيل',
