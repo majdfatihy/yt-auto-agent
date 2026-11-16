@@ -404,6 +404,18 @@ async function scheduledTick(env,now=Date.now()) {
   const plan=await readPlan(env);
   if(!topicPlan(plan)||plan.schedule_paused||!activeJobs(plan))return 'none';
   const jobs=plan.clip_jobs||{};
+  if(Object.values(jobs).some(j=>['needs_review','dispatch_unknown'].includes(j.state))) {
+    return 'blocked_for_review';
+  }
+  const stale=Object.entries(jobs).find(([,j])=>['queued','uploading'].includes(j.state) &&
+    Date.parse(j.queued_at||j.upload_started_at||0)<now-30*60*1000 &&
+    !j.alerted);
+  if(stale) {
+    stale[1].alerted=true;
+    await writePlan(env,plan);
+    await send(env,'⚠️ ريلز '+stale[0]+' ما زال قيد التنفيذ منذ أكثر من 30 دقيقة. '+
+      'لا يعاد رفعه تلقائيًا حتى لا يتكرر. راجع GitHub Actions وحالة يوتيوب.');
+  }
   // One in-flight upload at a time; scheduled times are intended dispatch
   // starts, not an impossible guarantee of YouTube video readiness.
   if(Object.values(jobs).some(j=>['queued','uploading'].includes(j.state)))
@@ -1183,6 +1195,22 @@ async function processUpdate(env, update) {
   if (text) return showMenu(env, source, await readPlan(env), 'الأمر غير معروف؛ استخدم الأزرار.');
 }
 export default {
+  async scheduled(controller,env,ctx) {
+    if(!env.GITHUB_PAT||!env.GITHUB_REPO||!env.BOT_STATE) {
+      console.error('REEL_CRON_CONFIG_MISSING');
+      return;
+    }
+    try {
+      const result=await scheduledTick(env,controller?.scheduledTime||Date.now());
+      console.log('REEL_SCHEDULE_TICK:',result);
+    } catch(e) {
+      console.error('REEL_SCHEDULE_ERROR:',String(e.message||e));
+      if(env.TELEGRAM_TOKEN&&env.TELEGRAM_CHAT_ID) {
+        try {await send(env,'⚠️ تعذر فحص جدول الريلز: '+
+          String(e.message||e).slice(0,160));}catch{}
+      }
+    }
+  },
   async fetch(request, env) {
     if (request.method !== 'POST') return new Response('Not found', {status: 404});
     if (!env.TELEGRAM_TOKEN || !env.TELEGRAM_CHAT_ID || !env.GITHUB_PAT ||
