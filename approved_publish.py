@@ -137,6 +137,7 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
     plan['status'] = 'publishing'
     save_plan(plan)
     completed = []
+    prior_results = list(plan.get('published_results') or [])
     try:
         with tempfile.TemporaryDirectory() as temp:
             for clip_id in ids:
@@ -170,12 +171,29 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
                         publication_status='scheduled' if options.get('publish_at') else 'private',
                         serial=clip.get('serial'))
                 completed.append({'clip_id': clip_id, 'result': result})
-                plan['published_results'] = completed
+                plan['published_results'] = prior_results + completed
                 save_plan(plan)
                 notify(result)
-        plan['status'] = 'published'
+        # A completed upload is not the end of the original source.
+        # Keep the same plan identity and unposted clips so Telegram can
+        # preview the next reel without re-running /prepare.
+        approved_set = set(ids)
+        plan['clips'] = [c for c in plan['clips'] if c['id'] not in approved_set]
+        plan['last_published_ids'] = list(ids)
+        plan['last_published_utc'] = datetime.now(timezone.utc).isoformat()
+        plan['previewed_ids'] = []
+        plan['preview_run_id'] = None
+        plan['approved_ids'] = []
+        plan['approval_utc'] = None
+        if plan['clips']:
+            plan['status'] = 'awaiting_selection'
+            plan['recommended_clip_id'] = plan['clips'][0]['id']
+            remaining_note = f" المتبقي من نفس المصدر: {len(plan['clips'])} ريلز. افتح القائمة لتكمل."
+        else:
+            plan['status'] = 'published'
+            remaining_note = " انتهت قائمة الريلز المتاحة من هذا المصدر."
         save_plan(plan)
-        notify('تم نشر المقاطع المعتمدة فقط: ' + ', '.join(map(str, ids)))
+        notify('تم رفع المقاطع المعتمدة فقط: ' + ', '.join(map(str, ids)) + '.' + remaining_note)
     except Exception:
         # Preserve 'publishing' for ambiguous outcomes, and 'auth_failed' only
         # for a confirmed pre-upload invalid_grant. Do not retry automatically.
