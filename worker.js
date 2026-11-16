@@ -1125,6 +1125,18 @@ async function processUpdate(env, update) {
   if (cmd === '/approve') {
     try {
       const plan = await readPlan(env);
+      if(topicPlan(plan)) {
+        if(!sameSource(source,plan))throw Error('مصدر الريلز مختلف.');
+        const raw=text.slice(text.split(/\s+/)[0].length).trim();
+        const ids=raw==='all'?openClips(plan).map(c=>c.id):
+          raw?parseChoices(raw,plan):selectedOpen(plan,await selection(env,plan));
+        if(!ids.length)throw Error('حدد عناوين من القائمة أو اكتب /approve all.');
+        const latest=await readPlan(env);
+        if(latest.created_utc!==plan.created_utc)throw Error('القائمة تغيرت.');
+        for(const c of latest.clips)if(ids.includes(c.id))c.title_approved=true;
+        await writePlan(env,latest);
+        return showMenu(env,source,latest,'✅ تم اعتماد '+ids.length+' عنوان فقط؛ لم يبدأ النشر.');
+      }
       if (!plan || plan.status !== 'previewed_awaiting_approval')
         throw Error('لا توجد معاينة تنتظر الموافقة. استخدم /clip أولًا.');
       if (!sameSource(source, plan)) throw Error('المعاينة لا تطابق الفيديو الحالي.');
@@ -1141,7 +1153,15 @@ async function processUpdate(env, update) {
     } catch (e) { return send(env, String(e.message || e)); }
   }
   if (cmd === '/publish') {
-    try { return await publishPlan(env, source, await readPlan(env)); }
+    try {
+      const plan=await readPlan(env);
+      if(topicPlan(plan)) {
+        const ids=selectedOpen(plan,await selection(env,plan));
+        if(!ids.length)throw Error('اختر الريلز المطلوب من القائمة أو /publishnow all.');
+        return queueTopicJobs(env,source,plan,ids);
+      }
+      return await publishPlan(env, source, plan);
+    }
     catch (e) { return send(env, String(e.message || e)); }
   }
   if (cmd === '/retry') {
