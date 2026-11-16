@@ -428,7 +428,8 @@ def upload_to_facebook(video_path, title, description):
         return f"❌ فيسبوك خطأ: {str(e)}"
 
 
-def upload_to_youtube(video_path, title, description, tags_str):
+def upload_to_youtube(video_path, title, description, tags_str, *,
+                      publish_at=None, recording_date=None):
     """رفع الفيديو كـ YouTube Shorts مع العنوان والوصف والتاجز"""
     if not YT_CLIENT_ID or not YT_CLIENT_SECRET or not YT_REFRESH_TOKEN:
         return "⏭️ يوتيوب: لم يتم ضبط المفاتيح بعد (تم التخطي)."
@@ -444,6 +445,16 @@ def upload_to_youtube(video_path, title, description, tags_str):
         youtube = build("youtube", "v3", credentials=creds)
         clean_tags = parse_youtube_tags(tags_str)
 
+        # Both optional fields are supplied before upload; never try to
+        # rewrite the real YouTube publishedAt property.
+        if recording_date:
+            from reel_schedule import validate_recording_date
+            recording_date = validate_recording_date(recording_date)
+        if publish_at:
+            from datetime import datetime as _dt, timezone as _tz
+            scheduled = _dt.fromisoformat(publish_at.replace("Z", "+00:00"))
+            if scheduled.tzinfo is None or scheduled <= _dt.now(_tz.utc):
+                raise ValueError("REEL_SCHEDULE_MUST_BE_IN_FUTURE")
         body = {
             "snippet": {
                 "title": title[:100],
@@ -458,8 +469,15 @@ def upload_to_youtube(video_path, title, description, tags_str):
             }
         }
 
+        parts = "snippet,status"
+        if recording_date:
+            body["recordingDetails"] = {"recordingDate": recording_date}
+            parts += ",recordingDetails"
+        if publish_at:
+            body["status"]["privacyStatus"] = "private"
+            body["status"]["publishAt"] = publish_at
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
-        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        request = youtube.videos().insert(part=parts, body=body, media_body=media)
         response = None
         while response is None:
             _, response = request.next_chunk()
@@ -468,9 +486,11 @@ def upload_to_youtube(video_path, title, description, tags_str):
         original_api_stamp = response.get("snippet", {}).get("publishedAt")
         details = ("وقت الرفع لدى يوتيوب: " + original_api_stamp) if original_api_stamp else (
             "وقت اكتمال طلب الرفع (UTC): " + completed_utc)
+        public_note = ("موعد النشر العام المجدول: " + publish_at) if publish_at else (
+            "تاريخ النشر للعامة: غير محدد حتى جعله عامًا.")
         return (f"✅ يوتيوب: تم رفع الفيديو بنجاح بوضع {body['status']['privacyStatus']} "
                 f"(https://youtu.be/{response['id']})\n"
-                f"{details}\nتاريخ النشر للعامة: غير محدد حتى جعله عامًا.")
+                f"{details}\n{public_note}")
     except Exception as e:
         return f"❌ يوتيوب خطأ: {str(e)}"
 
