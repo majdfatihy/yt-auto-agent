@@ -22,7 +22,7 @@ jobs:
       - name: JavaScript syntax
         run: node --check worker.js
       - name: Python syntax
-        run: python -m py_compile agent.py approved_publish.py clip_planner.py reel_metadata.py text_ai.py reel_title_quality.py source_video_info.py reel_history.py reel_full_plan.py reel_schedule.py telegram_reel_details.py
+        run: python -m py_compile agent.py approved_publish.py clip_planner.py reel_metadata.py text_ai.py reel_title_quality.py source_video_info.py reel_history.py reel_full_plan.py reel_schedule.py telegram_reel_details.py reel_video_layout.py
       - name: Worker offline regression tests
         run: |
           node tests/test_worker_stage2.mjs
@@ -46,3 +46,4 @@ jobs:
           python -m unittest discover -s tests -p test_reel_full_plan.py -v
           python -m unittest discover -s tests -p test_reel_schedule.py -v
           python -m unittest discover -s tests -p test_telegram_reel_details.py -v
+          python -m unittest discover -s tests -p test_reel_video_layout.py -v
