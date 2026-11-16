@@ -95,6 +95,39 @@ class ApprovalTests(unittest.TestCase):
             publish_approved_clips(REF,'1',SOURCE,'abc',read,save,upload,notifications.append)
         self.assertEqual(len(uploaded),1)
 
+    def test_partial_upload_retains_source_and_unpublished_clips_without_reprepare(self):
+        current = plan()
+        current['clips'].append(dict(id=2, title='Clip Two', start_time=30,
+                                     end_time=58, reel_title='شرح ريلز ثاني',
+                                     reel_seo_version=2, reel_language='ar',
+                                     reel_tags_string='شرح ريلز,مقطع ثاني,يوتيوب,شرح كامل,فيديو قصير,مقاطع جديدة',
+                                     reel_description='شرح المقطع التالي\\nالتفاصيل الواضحة\\nالشرح النهائي\\n#ريلز #يوتيوب #شرح'))
+        saves = []
+        def read():
+            return deepcopy(current)
+        def save(next_plan):
+            current.clear()
+            current.update(deepcopy(next_plan))
+            saves.append(current['status'])
+        deliveries=[]
+        with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
+            publish_approved_clips(REF,'1',SOURCE,'abc',read,save,
+                lambda *args:'✅ يوتيوب: تم رفع الفيديو (https://youtu.be/abcdefghijk)',
+                deliveries.append,downloader=lambda *args:{1:DATA})
+        self.assertEqual(current['status'],'awaiting_selection')
+        self.assertEqual([c['id'] for c in current['clips']],[2])
+        self.assertEqual(current['created_utc'],REF)
+        self.assertEqual(current['telegram_file_id'],'abc')
+        self.assertEqual(current['previewed_ids'],[])
+        self.assertIsNone(current['preview_run_id'])
+        self.assertEqual(current['approved_ids'],[])
+        self.assertEqual(current['published_results'][0]['clip_id'],1)
+        self.assertIn('المتبقي من نفس المصدر: 1',deliveries[-1])
+        with self.assertRaisesRegex(RuntimeError,'NOT_APPROVED'):
+            publish_approved_clips(REF,'1',SOURCE,'abc',read,save,
+                lambda *args:self.fail('would duplicate publication'),
+                deliveries.append,downloader=lambda *args:{1:DATA})
+
     def test_reject_missing_clip_metadata_before_upload(self):
         p=plan(); del p['clips'][0]['reel_title']
         events=[]
