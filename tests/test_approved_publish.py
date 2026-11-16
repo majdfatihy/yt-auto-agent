@@ -24,7 +24,7 @@ def plan():
                             reel_title='شرح ريلز تجريبي',
                             reel_seo_version=2, reel_language='ar',
                             reel_tags_string='شرح ريلز تجريبي,طريقة شرح الريلز,تجربة ريليز,مقاطع يوتيوب,شورتس عربي,خطوات ريلز',
-                            reel_description='شرح المقطع من التفريغ\\nتفاصيل حقيقية\\nخطوات مسموعة\\n#ريلز #شرح #فيديو')])
+                            reel_description='شرح المقطع من التفريغ\nتفاصيل حقيقية\nخطوات مسموعة\n#ريلز #شرح #فيديو')])
 
 def archive_bytes(bad_sha=False):
     manifest=dict(plan_ref=REF, video_url=SOURCE, telegram_file_id='abc',
