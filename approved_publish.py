@@ -167,7 +167,8 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
                     record_published(
                         video_url, clip['start_time'], clip['end_time'],
                         verified_id.group(1),
-                        publication_status='scheduled' if options.get('publish_at') else 'private')
+                        publication_status='scheduled' if options.get('publish_at') else 'private',
+                        serial=clip.get('serial'))
                 completed.append({'clip_id': clip_id, 'result': result})
                 plan['published_results'] = completed
                 save_plan(plan)
