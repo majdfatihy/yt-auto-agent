@@ -609,6 +609,108 @@ async function handleCallback(env, cb) {
     }
     if (!plan || pieces[2] !== await planKey(plan) || !sameSource(source, plan))
       throw Error('القائمة قديمة أو المصدر تغيّر. اطلب /menu.');
+
+    if(topicPlan(plan)) {
+      const action=pieces[1],id=Number(pieces[3]);
+      if(action==='page') {
+        const page=Number(pieces[3]);
+        if(!Number.isInteger(page)||page<0||page>=Math.ceil(plan.clips.length/PAGE_SIZE))
+          throw Error('رقم الصفحة غير صالح.');
+        await setCurrentPage(env,plan,page);
+        return showMenu(env,source,plan,'🎬 قائمة الريلز',cb.message?.message_id);
+      }
+      if(action==='details')return showReelDetails(env,plan,id);
+      if(action==='settings')return settingsMenu(env,plan,cb.message?.message_id);
+      if(action==='pref') {
+        const key=pieces[3],allowed=['captions','blur','privacy','max_seconds'];
+        if(!allowed.includes(key))throw Error('إعداد غير معروف.');
+        const o=await preferences(env);
+        const values=key==='captions'?[true,false]:
+          key==='blur'?['auto','on','off']:
+          key==='privacy'?['public','unlisted','private']:[59,180,30];
+        await updatePreference(env,key,values[(values.indexOf(o[key])+1)%values.length]);
+        return settingsMenu(env,plan,cb.message?.message_id);
+      }
+      if(['caption','blur','privacy'].includes(action)) {
+        if(!Number.isInteger(id))throw Error('رقم ريلز غير صحيح.');
+        const key={caption:'captions',blur:'blur',privacy:'privacy'}[action];
+        const next=await updateClipSetting(env,plan,id,key);
+        return send(env,'✅ تم ضبط '+key+' للريلز '+id+' على '+next+
+          '. الإعداد محفوظ، دون إعادة تحليل أو نشر.');
+      }
+      if(action==='toggle') {
+        if(!openClips(plan).some(c=>c.id===id))throw Error('هذا الريلز مجدول أو بدأ نشره.');
+        const ids=await selection(env,plan);
+        await setSelection(env,plan,ids.includes(id)?
+          ids.filter(x=>x!==id):[...ids,id].sort((a,b)=>a-b));
+        return showMenu(env,source,plan,'☑️ تحديث الاختيار',cb.message?.message_id);
+      }
+      if(action==='selectall'||action==='clear') {
+        await setSelection(env,plan,action==='clear'?[]:openClips(plan).map(c=>c.id));
+        return showMenu(env,source,plan,'☑️ تم تغيير التحديد',cb.message?.message_id);
+      }
+      if(action==='titles') {
+        const selected=selectedOpen(plan,await selection(env,plan));
+        const ids=selected.length?selected:openClips(plan).map(c=>c.id);
+        if(!ids.length)throw Error('لا توجد عناوين جديدة لاعتمادها.');
+        const latest=await readPlan(env);
+        if(latest.created_utc!==plan.created_utc)throw Error('القائمة تغيرت.');
+        for(const c of latest.clips)if(ids.includes(c.id))c.title_approved=true;
+        await writePlan(env,latest);
+        return showMenu(env,source,latest,'✅ تم اعتماد '+ids.length+
+          ' عنوان. اختر النشر الفوري أو الجدولة في أي وقت.',cb.message?.message_id);
+      }
+      if(action==='publishdirect') {
+        const ids=selectedOpen(plan,await selection(env,plan));
+        if(!ids.length)throw Error('اختر الريلز المطلوب أولًا. يمكنك تحديد الكل بضغطة واحدة.');
+        return queueTopicJobs(env,source,plan,ids);
+      }
+      if(action==='schedulehelp')return send(env,
+        '📅 جدول الريلز (بتوقيت القاهرة):\n'+
+        '/schedule 2026-11-22 18:00 10m\n'+
+        'لجدولة المحدد بالتتابع كل 10 دقائق. مثال 1h كل ساعة، 1d كل يوم.\n'+
+        '/schedule 3 2026-11-22 19:00\n'+
+        'لتحديد موعد منفرد للريلز 3. يمكنك ضبط أكثر من ريلز فرديًا.\n'+
+        'بعدها اضغط «اعتماد وتنفيذ الجدولة» مرة واحدة.\n'+
+        '/reschedule 3 2026-11-23 18:00 لتعديل مجدول لم يبدأ.\n'+
+        '/pause و /resume للتحكم في الجدول.',
+        inline([[{text:'🎛️ القائمة',callback_data:'p:menu:'+await planKey(plan)}]]));
+      if(action==='startschedule') {
+        const draft=plan.schedule_draft;
+        if(!draft||!Array.isArray(draft.ids)||!draft.ids.length)
+          throw Error('لا توجد مواعيد محفوظة. اكتب /schedule أولًا.');
+        return queueTopicJobs(env,source,plan,draft.ids,draft.items);
+      }
+      if(action==='pause') {
+        const latest=await readPlan(env);
+        if(latest.created_utc!==plan.created_utc||!activeJobs(latest))
+          throw Error('لا توجد مهام مجدولة حالية.');
+        latest.schedule_paused=!Boolean(latest.schedule_paused);
+        await writePlan(env,latest);
+        return showMenu(env,source,latest,latest.schedule_paused?
+          '⏸️ أوقفت بدء أي رفع مجدول جديد. الرفع الجاري لا يمكن إلغاؤه.':
+          '▶️ تم استئناف المهام المجدولة غير المنفذة.',cb.message?.message_id);
+      }
+      if(action==='preview') {
+        const ids=selectedOpen(plan,await selection(env,plan));
+        if(!ids.length)throw Error('اختر مقطعًا أو أكثر للمعاينة.');
+        await dispatch(env,plan,'preview',{
+          clip_ids:ids.join(','),clip_plan_ref:plan.created_utc
+        });
+        return send(env,'🎞️ بدأ تجهيز '+ids.length+' معاينة، دون نشر.');
+      }
+      if(action==='approvepublish'||action==='approve') {
+        if(plan.status!=='previewed_awaiting_approval' ||
+           String(plan.preview_run_id)!==String(pieces[3]))
+          throw Error('هذه معاينة قديمة؛ راجع القائمة.');
+        const chosen=await selection(env,plan);
+        const ids=selectedOpen(plan,chosen.length?chosen:previewIds(plan));
+        if(!ids.length||!ids.every(x=>previewIds(plan).includes(x)))
+          throw Error('لا توجد معاينات معتمدة صالحة.');
+        return queueTopicJobs(env,source,plan,ids);
+      }
+    }
+
     if (pieces[1] === 'menu' || pieces[1] === 'status')
       return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة', cb.message?.message_id);
     if (pieces[1] === 'continue') {
