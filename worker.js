@@ -144,7 +144,169 @@ function retriableAuthFailure(plan) {
       plan.auth_error_code === 'YOUTUBE_OAUTH_INVALID_GRANT' &&
       !(plan.published_results || []).length) || legacyOauthFailure(plan);
 }
+
+const PAGE_SIZE = 5;
+const DEFAULT_OPTS = {captions:true,blur:'auto',privacy:'public',max_seconds:59};
+function topicPlan(p) {return p?.method === 'topic_transcript_ai';}
+function clipJob(p,id) {return p?.clip_jobs?.[String(id)]||null;}
+function openClips(p) {return (p?.clips||[]).filter(c=>!['pending','queued','uploading','published','needs_review'].includes(clipJob(p,c.id)?.state));}
+async function preferences(env) {
+  try {const o=JSON.parse(await env.BOT_STATE.get('settings:'+env.TELEGRAM_CHAT_ID)||'null');
+    return {...DEFAULT_OPTS,...(o&&typeof o==='object'?o:{})};}
+  catch {return {...DEFAULT_OPTS};}
+}
+async function updatePreference(env,key,value) {
+  const o=await preferences(env);o[key]=value;
+  await env.BOT_STATE.put('settings:'+env.TELEGRAM_CHAT_ID,JSON.stringify(o));return o;
+}
+function perClipSettings(p,clip,defaults) {
+  return {...defaults,...((p.clip_settings||{})[String(clip.id)]||{})};
+}
+function videoTime(sec) {
+  const n=Math.round(Number(sec)||0);
+  const h=Math.floor(n/3600),m=Math.floor(n%3600/60),s=n%60;
+  return (h?String(h).padStart(2,'0')+':':'')+
+    String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+function cairoTime(value) {
+  return new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Cairo',
+    dateStyle:'short',timeStyle:'short',hourCycle:'h23'}).format(new Date(value));
+}
+function cairoToUtc(value) {
+  const m=String(value).match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/);
+  if(!m)throw Error('الوقت المطلوب: YYYY-MM-DD HH:MM بتوقيت القاهرة.');
+  const [year,month,day,hour,minute]=m.slice(1).map(Number);
+  if(month<1||month>12||day<1||day>31||hour>23||minute>59)throw Error('التاريخ غير صحيح.');
+  const naive=Date.UTC(year,month-1,day,hour,minute);
+  function formatted(ms) {
+    const a=new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Cairo',
+      year:'numeric',month:'2-digit',day:'2-digit',
+      hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(ms));
+    const n=k=>Number(a.find(p=>p.type===k)?.value);
+    return Date.UTC(n('year'),n('month')-1,n('day'),n('hour'),n('minute'));
+  }
+  let utc=naive;
+  for(let i=0;i<4;i++)utc+=naive-formatted(utc);
+  if(formatted(utc)!==naive)throw Error('وقت غير صالح بسبب تغيير الساعة الصيفية.');
+  if(utc<Date.now()+120000)throw Error('حدد موعدًا بعد دقيقتين على الأقل.');
+  return new Date(utc).toISOString();
+}
+function spacingMinutes(value) {
+  const m=String(value).match(/^(\d{1,5})(m|h|d)?$/i);
+  if(!m)throw Error('اكتب الفاصل مثل 10m أو 1h أو 1d.');
+  const v=Number(m[1])*({m:1,h:60,d:1440}[m[2]?.toLowerCase()||'m']);
+  if(!Number.isInteger(v)||v<1||v>43200)throw Error('الفاصل من دقيقة إلى 30 يومًا.');
+  return v;
+}
+async function currentPage(env,p) {
+  const v=Number(await env.BOT_STATE.get('page:'+env.TELEGRAM_CHAT_ID+':'+await planKey(p)));
+  return Number.isInteger(v)&&v>=0?v:0;
+}
+async function setCurrentPage(env,p,v) {
+  await env.BOT_STATE.put('page:'+env.TELEGRAM_CHAT_ID+':'+await planKey(p),
+    String(v),{expirationTtl:1209600});
+}
+async function topicControls(env,source,plan) {
+  const h=await planKey(plan), chosen=await selection(env,plan);
+  const page=await currentPage(env,plan),first=page*PAGE_SIZE,clips=plan.clips||[];
+  const rows=[];
+  for(const clip of clips.slice(first,first+PAGE_SIZE)) {
+    const job=clipJob(plan,clip.id),state=job?.state||'';
+    const icon=state==='published'?'✅':state==='pending'?'📅':
+      ['queued','uploading'].includes(state)?'⏳':state==='needs_review'?'⚠️':
+      chosen.includes(clip.id)?'☑️':'▫️';
+    rows.push([{text:icon+' '+clip.id+'. '+(clip.reel_title||clip.title).slice(0,37)+
+      ' · '+clipDuration(clip)+'ث',callback_data:'p:'+(state?'details':'toggle')+':'+h+':'+clip.id}]);
+    rows.push([{text:'📄 عرض النص والتفاصيل '+clip.id,callback_data:'p:details:'+h+':'+clip.id}]);
+  }
+  const nav=[];
+  if(page>0)nav.push({text:'◀️ السابق',callback_data:'p:page:'+h+':'+(page-1)});
+  nav.push({text:(page+1)+'/'+Math.max(1,Math.ceil(clips.length/PAGE_SIZE)),callback_data:'p:menu:'+h});
+  if(first+PAGE_SIZE<clips.length)nav.push({text:'التالي ▶️',callback_data:'p:page:'+h+':'+(page+1)});
+  rows.push(nav);
+  rows.push([{text:'☑️ تحديد المتاح كله',callback_data:'p:selectall:'+h},
+             {text:'إلغاء التحديد',callback_data:'p:clear:'+h}]);
+  rows.push([{text:'✅ اعتماد عناوين المحدد',callback_data:'p:titles:'+h}]);
+  rows.push([{text:'🎞️ معاينة',callback_data:'p:preview:'+h},
+             {text:'🚀 اعتماد ونشر المحدد',callback_data:'p:publishdirect:'+h}]);
+  rows.push([{text:'📅 الجدولة',callback_data:'p:schedulehelp:'+h},
+             {text:'⚙️ الإعدادات',callback_data:'p:settings:'+h}]);
+  if(plan.schedule_draft)rows.push([{text:'✅ اعتماد وتنفيذ الجدولة',
+    callback_data:'p:startschedule:'+h}]);
+  if(Object.values(plan.clip_jobs||{}).some(j=>j.state==='pending'))
+    rows.push([{text:plan.schedule_paused?'▶️ استئناف الجدولة':'⏸️ إيقاف الجدولة',
+      callback_data:'p:pause:'+h}]);
+  rows.push([{text:'🔄 تحديث القائمة',callback_data:'p:menu:'+h}]);
+  return inline(rows);
+}
+function topicListText(plan,page,chosen) {
+  const clips=plan.clips||[];
+  let t='🎬 الريلز: '+clips.length+' | المحدد: '+chosen.length+
+    ' | منشور: '+clips.filter(c=>clipJob(plan,c.id)?.state==='published').length+
+    ' | مجدول: '+clips.filter(c=>clipJob(plan,c.id)?.state==='pending').length+'\n';
+  for(const c of clips.slice(page*PAGE_SIZE,(page+1)*PAGE_SIZE)) {
+    const status=clipJob(plan,c.id)?.state||'';
+    t+='\n'+(chosen.includes(c.id)?'☑️ ':'')+'مقطع '+c.id+
+      ' | '+videoTime(c.end_time-c.start_time)+'\n'+(c.reel_title||c.title)+
+      '\n'+videoTime(c.start_time)+' ← '+videoTime(c.end_time)+
+      (status?' | '+status:'')+(c.seo_ready===false?' | SEO غير مكتمل':'')+'\n';
+  }
+  t+='\nافتح تفاصيل أي ريلز لقراءة النص الكامل وضبط المونتاج.';
+  if(plan.schedule_paused)t+='\n⏸️ الجدولة متوقفة.';
+  return t.slice(0,3750);
+}
+async function topicMenu(env,source,plan,title='🎛️ القائمة',messageId=null) {
+  const page=await currentPage(env,plan),chosen=await selection(env,plan);
+  return editOrSend(env,messageId,title+'\n'+topicListText(plan,page,chosen),
+    await topicControls(env,source,plan));
+}
+async function readReelTranscript(env,plan,id) {
+  const count=plan.transcript_chunks;
+  if(!Number.isInteger(count)||count<1||count>16)throw Error('التفريغ الكامل غير محفوظ لهذا المصدر.');
+  let text='';
+  for(let i=0;i<count;i++) {
+    const r=await github(env,'/actions/variables/TELEGRAM_REEL_TEXT_'+i);
+    if(!r.ok)throw Error('تعذر جلب النص المحفوظ من GitHub.');
+    text+=(await r.json()).value;
+  }
+  const zipped=Uint8Array.from(atob(text),c=>c.charCodeAt(0));
+  const stream=new Blob([zipped]).stream().pipeThrough(new DecompressionStream('gzip'));
+  const raw=await new Response(stream).arrayBuffer();
+  const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',raw))]
+    .map(x=>x.toString(16).padStart(2,'0')).join('');
+  if(hash!==plan.transcript_sha256)throw Error('فشل تطابق النص مع التفريغ الأصلي.');
+  const payload=JSON.parse(new TextDecoder().decode(raw));
+  if(payload.plan_ref!==plan.created_utc)throw Error('النص لا يخص الفيديو الحالي.');
+  return payload.texts?.[String(id)]||'';
+}
+async function showReelDetails(env,plan,id) {
+  const clip=plan.clips.find(c=>c.id===id);
+  if(!clip)throw Error('المقطع غير موجود.');
+  const config=perClipSettings(plan,clip,await preferences(env));
+  const job=clipJob(plan,id),h=await planKey(plan);
+  let msg='🎞️ مقطع '+id+' | رقم السلسلة '+clip.serial+'\n'+
+    (clip.reel_title||clip.title)+'\n'+
+    videoTime(clip.start_time)+' → '+videoTime(clip.end_time)+
+    ' | المدة '+videoTime(clip.end_time-clip.start_time)+'\n'+
+    'كابشنز: '+(config.captions?'نعم':'لا')+
+    ' | بلور: '+config.blur+' | خصوصية: '+config.privacy+
+    (job?'\nحالة النشر: '+job.state+(job.due_utc?' | '+cairoTime(job.due_utc):''):'')+
+    '\n\nالنص الكامل:\n'+await readReelTranscript(env,plan,id)+
+    '\n\nالوصف:\n'+(clip.reel_description||'SEO غير مكتمل')+
+    '\n\nالكلمات المفتاحية:\n'+(clip.reel_tags_string||'غير جاهزة');
+  for(let i=0;i<msg.length;i+=3500) {
+    const markup=(!job&&i===0)?inline([
+      [{text:'🔤 تغيير الكابشنز',callback_data:'p:caption:'+h+':'+id}],
+      [{text:'🌫️ تغيير البلور',callback_data:'p:blur:'+h+':'+id},
+       {text:'🔒 تغيير الخصوصية',callback_data:'p:privacy:'+h+':'+id}],
+      [{text:'🎛️ القائمة',callback_data:'p:menu:'+h}]
+    ]):null;
+    await send(env,msg.slice(i,i+3500),markup);
+  }
+}
+
 async function controls(env, source, plan) {
+  if(topicPlan(plan)&&sameSource(source,plan))return topicControls(env,source,plan);
   const srcHash = await sourceKey(source);
   const basic = [];
   if (source?.video_url) {
@@ -216,6 +378,7 @@ async function editOrSend(env, messageId, text, markup) {
   return send(env, text, markup);
 }
 async function showMenu(env, source, plan, title = '🎛️ لوحة بوت الريلز', messageId = null) {
+  if(topicPlan(plan)&&sameSource(source,plan))return topicMenu(env,source,plan,title,messageId);
   return editOrSend(env, messageId, title + '\n' +
     (source.video_url ? 'المصدر محفوظ. ' : 'أرسل رابط YouTube أو Google Drive للبدء. ') +
     (plan && sameSource(source, plan) ? (LABELS[plan.status] || 'الحالة: ' + plan.status) : ''),
