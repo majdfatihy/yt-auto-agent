@@ -69,7 +69,7 @@ class ReelMetadataTests(unittest.TestCase):
     def test_tags_include_multiword_quote_cost(self):
         self.assertEqual(youtube_tag_cost(['تحويل دولي', 'فودافون']), 10 + 2 + 1 + 7)
         with self.assertRaisesRegex(ValueError, '500'):
-            parse_youtube_tags(','.join(f'طريقة شحن كارت تلدا من إنستا باي رقم {i}' for i in range(20)))
+            parse_youtube_tags(','.join(f'شحن كارت تلدا والتطبيق {i:02d}' for i in range(18)))
 
     def test_no_literal_transcript_fallback_if_ai_is_unavailable(self):
         with patch('reel_metadata.generate_json', side_effect=RuntimeError('API unavailable')):
