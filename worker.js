@@ -305,6 +305,137 @@ async function showReelDetails(env,plan,id) {
   }
 }
 
+
+function activeJobs(plan) {
+  return Object.values(plan?.clip_jobs||{}).some(j=>['pending','queued','uploading'].includes(j?.state));
+}
+async function settingsMenu(env,plan,messageId=null) {
+  const o=await preferences(env),h=await planKey(plan);
+  const rows=[
+    [{text:'🔤 الكابشنز: '+(o.captions?'تشغيل':'إيقاف'),callback_data:'p:pref:'+h+':captions'}],
+    [{text:'🌫️ البلور: '+o.blur,callback_data:'p:pref:'+h+':blur'}],
+    [{text:'🔒 الخصوصية: '+o.privacy,callback_data:'p:pref:'+h+':privacy'}],
+    [{text:'⏱️ أقصى مدة: '+o.max_seconds+'ث',callback_data:'p:pref:'+h+':max_seconds'}],
+    [{text:'🎛️ رجوع',callback_data:'p:menu:'+h}]
+  ];
+  return editOrSend(env,messageId,
+    '⚙️ الإعدادات الافتراضية للريلز الجديدة\nتغيّر بالضغط مباشرة، دون تأكيد آخر.\n'+
+    'يمكن تخصيص كل مقطع من شاشة تفاصيله.\n'+
+    'ملاحظة: أقصى مدة يطبّق عند تحليل الرابط التالي، لا يعيد قص المصدر الحالي.',
+    inline(rows));
+}
+async function updateClipSetting(env,plan,id,key) {
+  const clip=plan.clips.find(c=>c.id===id);
+  if(!clip||clipJob(plan,id))throw Error('لا يمكن تغيير إعدادات مقطع بدأ نشره أو جدولتُه.');
+  const o=perClipSettings(plan,clip,await preferences(env));
+  const values=key==='captions'?[true,false]:
+    key==='blur'?['auto','on','off']:['public','unlisted','private'];
+  const idx=values.indexOf(o[key]);
+  const next=values[(idx+1)%values.length];
+  plan.clip_settings=plan.clip_settings||{};
+  plan.clip_settings[String(id)]={...(plan.clip_settings[String(id)]||{}),[key]:next};
+  await writePlan(env,plan);
+  return next;
+}
+function selectedOpen(plan,chosen) {
+  const eligible=new Set(openClips(plan).map(c=>c.id));
+  return chosen.filter(id=>eligible.has(id));
+}
+async function queueTopicJobs(env,source,original,chosen,scheduled=null) {
+  if(!topicPlan(original)||!sameSource(source,original))
+    throw Error('الجدول لا يطابق مصدر الريلز.');
+  const plan=await readPlan(env);
+  if(!topicPlan(plan)||plan.created_utc!==original.created_utc)
+    throw Error('القائمة تغيرت، افتح /menu.');
+  const ids=selectedOpen(plan,chosen);
+  if(!ids.length||ids.length!==chosen.length||ids.length>40||
+      new Set(ids).size!==ids.length)
+    throw Error('حدد ريلز لم يبدأ نشره أو جدولته.');
+  const defaults=await preferences(env), now=new Date().toISOString();
+  const states={...(plan.clip_jobs||{})};
+  for(const id of ids) {
+    const clip=plan.clips.find(c=>c.id===id);
+    if(!clip?.seo_ready||clip?.reel_seo_version!==3||
+       !clip.reel_title?.endsWith(' '+String(clip.serial)) ||
+       !clip.reel_description||!clip.reel_tags_string)
+      throw Error('بيانات SEO للريلز '+id+' غير مكتملة؛ لا يمكن رفعه.');
+    const config=perClipSettings(plan,clip,defaults);
+    if(!['public','private','unlisted'].includes(config.privacy) ||
+       !['auto','on','off'].includes(config.blur) ||
+       typeof config.captions!=='boolean')
+      throw Error('إعدادات مونتاج أو خصوصية غير صالحة.');
+    const at=scheduled?.[String(id)]||null;
+    if(scheduled&&!at)throw Error('موعد ريلز '+id+' غير محدد.');
+    if(at && (!Number.isFinite(Date.parse(at))||Date.parse(at)<Date.now()+60000))
+      throw Error('وقت جدول ريلز '+id+' انتهى أو قريب جدًا.');
+    states[String(id)]={
+      state:at?'pending':'queued',approved_at:now,privacy:config.privacy,
+      captions:config.captions,blur:config.blur,
+      ...(at?{due_utc:at}:{}),
+      ...(at?{}:{queued_at:now})
+    };
+    clip.title_approved=true;
+  }
+  plan.clip_jobs=states;
+  delete plan.schedule_draft;
+  await writePlan(env,plan);
+  if(!scheduled) {
+    try {
+      await dispatch(env,plan,'direct_publish',{
+        clip_ids:ids.join(','),clip_plan_ref:plan.created_utc
+      });
+    } catch (err) {
+      const latest=await readPlan(env);
+      if(latest?.created_utc===plan.created_utc) {
+        for(const id of ids)
+          if(latest.clip_jobs?.[String(id)]?.state==='queued')
+            delete latest.clip_jobs[String(id)];
+        await writePlan(env,latest);
+      }
+      throw err;
+    }
+    return send(env,'🚀 تم اعتماد وإرسال أمر الرفع العلني/الخاص حسب إعداد كل ريلز: '+
+      ids.join('، ')+'. بدون تأكيد ثانٍ. نتيجة كل رفع ستصل هنا.');
+  }
+  return send(env,'📅 تم اعتماد جدول '+ids.length+' ريلز. الرفع سيبدأ تلقائيًا في مواعيد القاهرة المحددة؛ '+ 
+    'ابدأ بـ /menu لمتابعة الحالة. يمكنك /pause أو /resume أو /reschedule.');
+}
+async function scheduledTick(env,now=Date.now()) {
+  const plan=await readPlan(env);
+  if(!topicPlan(plan)||plan.schedule_paused||!activeJobs(plan))return 'none';
+  const jobs=plan.clip_jobs||{};
+  // One in-flight upload at a time; scheduled times are intended dispatch
+  // starts, not an impossible guarantee of YouTube video readiness.
+  if(Object.values(jobs).some(j=>['queued','uploading'].includes(j.state)))
+    return 'busy';
+  const pending=Object.entries(jobs).filter(([,j])=>j.state==='pending' &&
+    j.due_utc && Date.parse(j.due_utc)<=now && j.approved_at)
+    .sort((a,b)=>Date.parse(a[1].due_utc)-Date.parse(b[1].due_utc));
+  if(!pending.length)return 'waiting';
+  const [id]=pending[0];
+  // Persist reservation *before* dispatch. If the dispatch response is
+  // ambiguous we leave a locked state rather than risk a duplicate upload.
+  jobs[id].state='queued';
+  jobs[id].queued_at=new Date(now).toISOString();
+  await writePlan(env,plan);
+  try {
+    await dispatch(env,plan,'direct_publish',{
+      clip_ids:id,clip_plan_ref:plan.created_utc
+    });
+    return 'queued:'+id;
+  } catch(e) {
+    const latest=await readPlan(env);
+    if(latest?.created_utc===plan.created_utc &&
+       latest.clip_jobs?.[id]?.state==='queued') {
+      latest.clip_jobs[id].state='dispatch_unknown';
+      latest.clip_jobs[id].error=String(e.message||e).slice(0,180);
+      await writePlan(env,latest);
+    }
+    await send(env,'⚠️ تعذّر التأكد من إرسال ريلز '+id+' للرفع. توقف تلقائيًا لمنع التكرار. راجع /status.');
+    return 'dispatch_unknown:'+id;
+  }
+}
+
 async function controls(env, source, plan) {
   if(topicPlan(plan)&&sameSource(source,plan))return topicControls(env,source,plan);
   const srcHash = await sourceKey(source);
