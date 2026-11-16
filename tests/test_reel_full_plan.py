@@ -26,6 +26,16 @@ class FullVideoTest(unittest.TestCase):
         self.assertTrue(any(c['start_time']>=106.4 for c in plan['clips']))
         self.assertTrue(any(c['end_time']<=66.5 for c in plan['clips']))
 
+    def test_published_sparse_serials_not_reused_on_new_reels(self):
+        history=[
+            {'youtube_video_id':'abcdefghijk','start_time':66.5,'end_time':106.4,'serial':4},
+            {'youtube_video_id':'lmnopqrstuv','start_time':0,'end_time':32,'serial':2}
+        ]
+        plan=build_remaining_plan(SOURCE,'',CUES,210.0,history)
+        self.assertTrue(plan['clips'])
+        self.assertTrue(all(clip['serial']>4 for clip in plan['clips']))
+        self.assertEqual(len({c['serial'] for c in plan['clips']}),len(plan['clips']))
+
     def test_no_remaining_after_all_published(self):
         history=[{'youtube_video_id':'abcdefghijk','start_time':0,'end_time':60}]
         plan=build_remaining_plan(SOURCE,'',CUES,60.0,history)
