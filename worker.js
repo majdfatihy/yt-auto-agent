@@ -876,7 +876,7 @@ function parseChoices(value, plan) {
   const ids = text.split(/[\s,،.]+/).map(Number);
   if (!Array.isArray(plan?.clips) || !['awaiting_selection', 'previewed_awaiting_approval'].includes(plan?.status))
     throw Error('لا توجد اقتراحات متاحة. أرسل /prepare أولًا.');
-  const valid = new Set(plan.clips.map(c => c.id));
+  const valid = new Set((topicPlan(plan)?openClips(plan):plan.clips).map(c => c.id));
   if (ids.length > 40 || new Set(ids).size !== ids.length || ids.some(id => !valid.has(id)))
     throw Error('اختر أرقامًا مختلفة من القائمة الحالية، مثل 1,3');
   if (typeof plan.created_utc !== 'string' || plan.created_utc.length < 20)
@@ -885,6 +885,10 @@ function parseChoices(value, plan) {
 }
 async function dispatch(env, source, action, extra = {}) {
   const payload = {video_url: source.video_url, agent_action: action, ...extra};
+  if(action==='prepare' && payload.max_seconds===undefined) {
+    const current=await preferences(env);
+    payload.max_seconds=current.max_seconds;
+  }
   if (source.telegram_file_id) payload.telegram_file_id = source.telegram_file_id;
   const r = await github(env, '/dispatches', 'POST',
     {event_type: 'process_video', client_payload: payload});
