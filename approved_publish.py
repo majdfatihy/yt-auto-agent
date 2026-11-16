@@ -13,6 +13,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 import requests
+from reel_metadata import parse_youtube_tags
+from reel_title_quality import valid_title
 
 
 def download_approved_previews(plan, expected_reference, chosen_ids, http=requests):
@@ -91,11 +93,19 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
         if not clip:
             raise RuntimeError('PUBLISH_CLIP_NOT_IN_PLAN')
         title, description = clip.get('reel_title'), clip.get('reel_description')
-        if (not isinstance(title, str) or not 8 <= len(title) <= 100 or
-                not isinstance(description, str) or not description.strip() or
-                re.search(r'https?://|youtu\.be|youtube\.com', description, re.I)):
-            raise RuntimeError('REEL_METADATA_NOT_PREVIEWED: prepare a new preview before publishing')
-        metadata[clip_id] = (title, description)
+        keywords = clip.get('reel_tags_string')
+        if (clip.get('reel_seo_version') != 2 or not valid_title(title)
+                or clip.get('reel_language') != 'ar'
+                or not isinstance(description, str) or not description.strip()
+                or len(description.splitlines()) != 4
+                or len(description.encode('utf-8')) > 5000
+                or re.search(r'https?://|youtu\.be|youtube\.com', description, re.I)):
+            raise RuntimeError('REEL_METADATA_NOT_PREVIEWED: prepare a new SEO preview before publishing')
+        try:
+            parse_youtube_tags(keywords)
+        except ValueError as exc:
+            raise RuntimeError('REEL_TAGS_NOT_PREVIEWED_OR_OVER_500_CHARS') from exc
+        metadata[clip_id] = (title, description, keywords)
     if not os.getenv('YT_CLIENT_ID') or not os.getenv('YT_CLIENT_SECRET') or not os.getenv('YT_REFRESH_TOKEN'):
         raise RuntimeError('YOUTUBE_OAUTH_MISSING: refuse to claim publication')
     # Reserve publication state: on a crash, never retry blindly and accidentally duplicate uploads.
@@ -112,8 +122,8 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
                     raise RuntimeError('PUBLISH_CLIP_NOT_IN_PLAN')
                 target = Path(temp) / f'clip-{clip_id}.mp4'
                 target.write_bytes(files[clip_id])
-                title, desc = metadata[clip_id]
-                result = upload(str(target), title, desc, '')
+                title, desc, keywords = metadata[clip_id]
+                result = upload(str(target), title, desc, keywords)
                 if not isinstance(result, str) or not result.startswith('✅'):
                     # Google rejected the refresh token before the first upload request.
                     # This exact failure is known to be pre-upload; other failures remain
