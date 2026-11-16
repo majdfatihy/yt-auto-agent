@@ -15,6 +15,9 @@ from pathlib import Path
 import requests
 from reel_metadata import parse_youtube_tags
 from reel_title_quality import valid_title
+from reel_history import (load_history, has_overlap, record_published,
+                          canonical_source, CONFIRMED_LEGACY_UPLOADS, overlaps)
+from reel_schedule import schedule_utc, validate_recording_date
 
 
 def download_approved_previews(plan, expected_reference, chosen_ids, http=requests):
@@ -94,7 +97,8 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
             raise RuntimeError('PUBLISH_CLIP_NOT_IN_PLAN')
         title, description = clip.get('reel_title'), clip.get('reel_description')
         keywords = clip.get('reel_tags_string')
-        if (clip.get('reel_seo_version') != 2 or not valid_title(title)
+        expected_version = 3 if plan.get('version', 1) >= 2 else 2
+        if (clip.get('reel_seo_version') != expected_version or not valid_title(title)
                 or clip.get('reel_language') != 'ar'
                 or not isinstance(description, str) or not description.strip()
                 or len(description.splitlines()) != 4
@@ -106,6 +110,25 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
         except ValueError as exc:
             raise RuntimeError('REEL_TAGS_NOT_PREVIEWED_OR_OVER_500_CHARS') from exc
         metadata[clip_id] = (title, description, keywords)
+    # Mandatory duplicate check before reserving any upload.
+    history = (load_history(video_url)
+               if os.getenv('GH_PAT') and os.getenv('GITHUB_REPOSITORY')
+               else list(CONFIRMED_LEGACY_UPLOADS.get(canonical_source(video_url), [])))
+    intervals = []
+    settings = {}
+    for index, clip_id in enumerate(ids):
+        clip = next(item for item in plan['clips'] if item['id'] == clip_id)
+        start, end = float(clip['start_time']), float(clip['end_time'])
+        if has_overlap(history, start, end) or any(overlaps(start, end, a, b)
+                                                  for a, b in intervals):
+            raise RuntimeError('REEL_ALREADY_UPLOADED_OR_OVERLAPPING: cannot publish duplicate clips')
+        intervals.append((start, end))
+        schedule_at = schedule_utc(plan, index, len(ids))
+        recorded_at = validate_recording_date(
+            plan.get('recording_date_override') or clip.get('recording_date'))
+        settings[clip_id] = dict(
+            **({'publish_at': schedule_at} if schedule_at else {}),
+            **({'recording_date': recorded_at} if recorded_at else {}))
     if not os.getenv('YT_CLIENT_ID') or not os.getenv('YT_CLIENT_SECRET') or not os.getenv('YT_REFRESH_TOKEN'):
         raise RuntimeError('YOUTUBE_OAUTH_MISSING: refuse to claim publication')
     # Reserve publication state: on a crash, never retry blindly and accidentally duplicate uploads.
@@ -123,7 +146,8 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
                 target = Path(temp) / f'clip-{clip_id}.mp4'
                 target.write_bytes(files[clip_id])
                 title, desc, keywords = metadata[clip_id]
-                result = upload(str(target), title, desc, keywords)
+                options = settings[clip_id]
+                result = upload(str(target), title, desc, keywords, **options)
                 if not isinstance(result, str) or not result.startswith('✅'):
                     # Google rejected the refresh token before the first upload request.
                     # This exact failure is known to be pre-upload; other failures remain
@@ -135,6 +159,16 @@ def publish_approved_clips(expected_reference, choice_text, video_url, file_id,
                         plan['auth_failed_utc'] = datetime.now(timezone.utc).isoformat()
                         save_plan(plan)
                     raise RuntimeError(f'YOUTUBE_UPLOAD_UNCONFIRMED: {result}')
+                verified_id = re.search(r'https://youtu\.be/([A-Za-z0-9_-]{11})', result)
+                if os.getenv('GH_PAT') and os.getenv('GITHUB_REPOSITORY'):
+                    if not verified_id:
+                        raise RuntimeError('UPLOAD_SUCCESS_NO_VERIFIED_YOUTUBE_ID: '
+                                           'manual reconciliation needed; do not retry')
+                    record_published(
+                        video_url, clip['start_time'], clip['end_time'],
+                        verified_id.group(1),
+                        publication_status='scheduled' if options.get('publish_at') else 'private',
+                        serial=clip.get('serial'))
                 completed.append({'clip_id': clip_id, 'result': result})
                 plan['published_results'] = completed
                 save_plan(plan)

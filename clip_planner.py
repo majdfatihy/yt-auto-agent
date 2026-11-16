@@ -17,7 +17,7 @@ from reel_title_quality import valid_title
 
 MIN_CLIP_SECONDS = 15
 MAX_CLIP_SECONDS = 59
-MAX_PROPOSALS = 5
+MAX_PROPOSALS = 40
 PLAN_VARIABLE = "TELEGRAM_CLIP_PROPOSALS"
 
 
@@ -347,9 +347,16 @@ def record_preview_result(expected_reference, clip_ids, run_id=None, clip_metada
         clip['reel_description'] = description
         clip['reel_tags_string'] = tags_string
         clip['reel_language'] = 'ar'
-        clip['reel_seo_version'] = 2
+        if latest.get('version', 1) >= 2:
+            if (not isinstance(title, str)
+                    or not title.endswith(' ' + str(clip.get('serial', clip['id'])))
+                    or '#' not in title):
+                raise RuntimeError('REEL_SEO_TITLE_NUMBER_OR_HASHTAG_MISSING')
+        clip['reel_seo_version'] = 3 if latest.get('version', 1) >= 2 else 2
         clip['reel_long_titles'] = value.get('long_titles', [])
         clip['reel_short_titles'] = value.get('short_titles', [])
+        clip['recording_date'] = value.get('recording_date')
+        clip['source_published_at'] = value.get('source_published_at')
     latest['status'] = 'previewed_awaiting_approval'
     latest['previewed_ids'] = clip_ids
     latest['previewed_utc'] = datetime.now(timezone.utc).isoformat()

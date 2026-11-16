@@ -94,7 +94,7 @@ plan.status='previewed_awaiting_approval';
 plan.previewed_ids=[3];
 plan.preview_run_id='13579';
 await msg('/menu');
-const approve=button('موافق: اعتماد ونشر خاص');
+const approve=button('اعتماد ونشر المحدد');
 await press(approve.replace(':13579', ':99999'));
 assert.equal(plan.status,'previewed_awaiting_approval','old preview callback must not approve');
 await press(approve,111);
@@ -111,7 +111,7 @@ const publishedCount=dispatched.length;
 await press(approve);
 assert.equal(dispatched.length,publishedCount,'old button cannot republish');
 await msg('/menu');
-assert.ok(!lastMarkup().some(x=>x.text.includes('موافق: اعتماد ونشر خاص')));
+assert.ok(!lastMarkup().some(x=>x.text.includes('اعتماد ونشر المحدد')));
 
 // Auth failed after token refresh before upload, explicit second-confirmation retry.
 plan={...structuredClone(initial),status:'auth_failed',previewed_ids:[3],preview_run_id:'13579',

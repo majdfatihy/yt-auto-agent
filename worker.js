@@ -127,10 +127,18 @@ async function controls(env, source, plan) {
       rows.push([{text: `${chosen.includes(clip.id) ? '✅' : '▫️'} ${clip.id}. ${clip.title.slice(0, 37)} · ${clipDuration(clip)}ث`,
                   callback_data: `p:toggle:${hash}:${clip.id}`}]);
     }
-    rows.push([{text: '🎞️ معاينة المقاطع المختارة (' + chosen.length + ')',
-                callback_data: 'p:preview:' + hash}]);
+    rows.push([
+      {text: '🎞️ معاينة المحدد (' + chosen.length + ')', callback_data: 'p:preview:' + hash},
+      {text: '🎞️ معاينة الكل (' + plan.clips.length + ')', callback_data: 'p:previewall:' + hash}
+    ]);
+    if (plan.status === 'previewed_awaiting_approval') {
+      rows.push([
+        {text: 'تحديد كل المعاينات', callback_data: 'p:selectall:' + hash},
+        {text: 'إلغاء التحديد', callback_data: 'p:clear:' + hash}
+      ]);
+    }
     if (plan.status === 'previewed_awaiting_approval' && previewIds(plan).length) {
-      rows.push([{text: '✅ موافق: اعتماد ونشر خاص للمقطع ' + previewIds(plan).join('،'),
+      rows.push([{text: '✅ اعتماد ونشر المحدد أو كل المعاينات',
                   callback_data: 'p:approvepublish:' + hash + ':' + plan.preview_run_id}]);
     }
   } else if (plan.status === 'approved') {
@@ -280,13 +288,24 @@ async function handleCallback(env, cb) {
       await setSelection(env, plan, changed);
       return showMenu(env, source, plan, 'اختياراتك: ' + (changed.join('، ') || 'لا يوجد'), cb.message?.message_id);
     }
-    if (pieces[1] === 'preview') {
-      const ids = await selection(env, plan);
-      if (!ids.length) throw Error('اختار مقطعًا واحدًا على الأقل من الأزرار.');
+    if (pieces[1] === 'selectall' || pieces[1] === 'clear') {
+      if (!['awaiting_selection','previewed_awaiting_approval'].includes(plan.status))
+        throw Error('لا يمكن تحديد مقاطع من هذه الحالة.');
+      const all = plan.status === 'previewed_awaiting_approval' ?
+        previewIds(plan) : plan.clips.map(c=>c.id);
+      await setSelection(env, plan, pieces[1] === 'clear' ? [] : all);
+      return showMenu(env, source, plan,
+        pieces[1] === 'clear' ? 'تم إلغاء التحديد.' : 'تم تحديد كل المقاطع المتاحة.',
+        cb.message?.message_id);
+    }
+    if (pieces[1] === 'preview' || pieces[1] === 'previewall') {
+      const ids = pieces[1] === 'previewall' ?
+        plan.clips.map(c=>c.id) : await selection(env, plan);
+      if (!ids.length) throw Error('لا توجد مقاطع متبقية للمعاينة.');
       parseChoices(ids.join(','), plan);
       await dispatch(env, plan, 'preview',
         {clip_ids: ids.join(','), clip_plan_ref: plan.created_utc});
-      return send(env, '⏳ بدأت معاينة: ' + ids.join('، ') + '. بدون نشر.');
+      return send(env, 'بدأ تجهيز معاينة ' + ids.length + ' مقطع دون نشر. ستصلك البيانات مع كل فيديو.');
     }
     if (pieces[1] === 'approvepublish') {
       // One explicit owner action AFTER the video+SEO preview. Sending a link
@@ -295,15 +314,17 @@ async function handleCallback(env, cb) {
         throw Error('لا توجد معاينة جاهزة للموافقة والنشر.');
       if (pieces[3] !== String(plan.preview_run_id))
         throw Error('زر قديم. افتح القائمة لمعاينة النسخة الأحدث.');
-      const ids = previewIds(plan);
-      if (!ids.every(id => plan.clips.some(c => c.id === id)))
-        throw Error('المعاينة لا تطابق المقطع المحفوظ.');
+      const chosen = await selection(env, plan);
+      const ids = chosen.length ? chosen : previewIds(plan);
+      if (!ids.length || !ids.every(id => previewIds(plan).includes(id) &&
+                                        plan.clips.some(c => c.id === id)))
+        throw Error('التحديد يتضمن مقطعًا لم تتم معاينته. حدد من المعاينات فقط.');
       await requirePreviewArtifact(env, plan);
       const latest = await readPlan(env);
       if (!latest || latest.status !== 'previewed_awaiting_approval' ||
           latest.created_utc !== plan.created_utc ||
           String(latest.preview_run_id) !== String(plan.preview_run_id) ||
-          JSON.stringify(previewIds(latest)) !== JSON.stringify(ids))
+          !ids.every(id => previewIds(latest).includes(id)))
         throw Error('هذه المعاينة اتعمدت أو اتغيرت بالفعل؛ لا تكرر الرفع.');
       latest.approved_ids = ids;
       latest.approval_utc = new Date().toISOString();
@@ -316,9 +337,11 @@ async function handleCallback(env, cb) {
         throw Error('لا توجد معاينة جاهزة للاعتماد.');
       if (pieces[3] !== String(plan.preview_run_id))
         throw Error('زر اعتماد قديم. افتح القائمة لمعاينة أحدث إصدار.');
-      const ids = previewIds(plan);
-      if (!ids.every(id => plan.clips.some(c => c.id === id)))
-        throw Error('المعاينة لا تطابق المقاطع الحالية.');
+      const selected = await selection(env, plan);
+      const ids = selected.length ? selected : previewIds(plan);
+      if (!ids.length || !ids.every(id => previewIds(plan).includes(id) &&
+                                        plan.clips.some(c => c.id === id)))
+        throw Error('اختر من المقاطع التي تمت معاينتها فقط.');
       await requirePreviewArtifact(env, plan);
       plan.status = 'approved';
       plan.approved_ids = ids;
@@ -404,7 +427,7 @@ function parseChoices(value, plan) {
   if (!Array.isArray(plan?.clips) || !['awaiting_selection', 'previewed_awaiting_approval'].includes(plan?.status))
     throw Error('لا توجد اقتراحات متاحة. أرسل /prepare أولًا.');
   const valid = new Set(plan.clips.map(c => c.id));
-  if (ids.length > 5 || new Set(ids).size !== ids.length || ids.some(id => !valid.has(id)))
+  if (ids.length > 40 || new Set(ids).size !== ids.length || ids.some(id => !valid.has(id)))
     throw Error('اختر أرقامًا مختلفة من القائمة الحالية، مثل 1,3');
   if (typeof plan.created_utc !== 'string' || plan.created_utc.length < 20)
     throw Error('قائمة اقتراحات غير صالحة. أرسل /prepare.');
@@ -443,6 +466,46 @@ async function processUpdate(env, update) {
     await env.BOT_STATE.put(key, '{}');
     return send(env, 'تم إلغاء المصدر والاقتراحات. لم يُنشر شيء.');
   }
+  if (cmd === '/schedule') {
+    const plan = await readPlan(env);
+    if (!plan || !sameSource(source, plan) ||
+        !['awaiting_selection','previewed_awaiting_approval'].includes(plan.status))
+      return send(env, 'لا توجد ريلز جاهزة لضبط موعد النشر. أرسل الرابط أولًا.');
+    const args = text.slice(text.indexOf(' ') + 1).trim();
+    if (args.toLowerCase() === 'off') {
+      delete plan.schedule;
+      await writePlan(env, plan);
+      return send(env, 'تم إلغاء الجدولة. سيبقى الرفع خاصًا عند الاعتماد.');
+    }
+    const match = args.match(/^(\d{4}-\d\d-\d\d)\s+(\d\d:\d\d)(?:\s+(\d{1,3}))?$/);
+    if (!match || !Number.isFinite(Date.parse(match[1]+'T'+match[2]+':00Z')) ||
+        Number(match[3]||24) < 1 || Number(match[3]||24) > 168)
+      return send(env, 'صيغة الجدولة بتوقيت مصر: /schedule 2026-11-20 18:00 24\nالرقم الأخير ساعات بين نشر الريلز المتعددة. /schedule off للإلغاء.');
+    plan.schedule = {first_local: match[1]+' '+match[2],
+                     spacing_hours: Number(match[3] || 24)};
+    await writePlan(env, plan);
+    return send(env, 'تم حفظ الموعد بمصر: '+plan.schedule.first_local+
+      '؛ وعند اعتماد عدة ريلز يكون الفرق '+plan.schedule.spacing_hours+
+      ' ساعة. لن يبدأ الرفع قبل الموافقة.');
+  }
+  if (cmd === '/recorded') {
+    const plan = await readPlan(env);
+    if (!plan || !sameSource(source, plan) ||
+        !['awaiting_selection','previewed_awaiting_approval'].includes(plan.status))
+      return send(env,'لا توجد ريلز حالية لتسجيل تاريخ التصوير.');
+    const value = text.slice(text.indexOf(' ')+1).trim();
+    if (value.toLowerCase() === 'off') delete plan.recording_date_override;
+    else {
+      // A date-only guess would invent a recording time; require full timezone.
+      const date = Date.parse(value);
+      if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d)$/.test(value) ||
+          !Number.isFinite(date) || date > Date.now())
+        return send(env,'اكتب تاريخ التصوير المؤكد مع الساعة والمنطقة الزمنية، مثل: /recorded 2026-11-15T14:30:00+02:00 أو /recorded off.');
+      plan.recording_date_override = value;
+    }
+    await writePlan(env, plan);
+    return send(env,'تم تحديث تاريخ التسجيل الموثق للفيديو دون إعادة رفع.');
+  }
   if (cmd === '/approve') {
     try {
       const plan = await readPlan(env);
@@ -458,7 +521,7 @@ async function processUpdate(env, update) {
       plan.approval_utc = new Date().toISOString();
       plan.status = 'approved';
       await writePlan(env, plan);
-      return showMenu(env, source, plan, '✅ تم اعتماد المقاطع ' + ids.join('، ') + '.');
+      return publishPlan(env, source, plan);
     } catch (e) { return send(env, String(e.message || e)); }
   }
   if (cmd === '/publish') {

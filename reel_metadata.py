@@ -128,28 +128,38 @@ def _validate(payload, clip_text=None, full_context=None):
         if keyword_topics < 3:
             raise ValueError("REEL_METADATA_KEYWORDS_NOT_IN_TRANSCRIPT")
 
-    # Creator's 3-long + 3-short variants are proposed for review, not auto-posted.
-    long_titles = payload.get("long_titles")
-    short_titles = payload.get("short_titles")
-    for variants in (long_titles, short_titles):
-        if not isinstance(variants, list) or len(variants) != 3 or any(
-                not valid_title(t, clip_text) for t in variants):
-            raise ValueError("REEL_METADATA_TITLE_VARIANTS_INVALID")
-
     description = "\n".join(line.strip() for line in lines) + "\n" + " ".join(tags)
     if len(description.encode("utf-8")) > 5000:
         raise ValueError("REEL_METADATA_DESCRIPTION_EXCEEDS_5000_BYTES")
     return {
         "title": title,
-        "long_titles": long_titles,
-        "short_titles": short_titles,
+        "hashtags": tags,
         "description": description,
         "tags_string": tags_string,
         "language": "ar",
     }
 
 
-def generate_reel_metadata(cues, start, end, suggested_title, api_key=None):
+def numbered_seo_title(base_title, hashtags, number, clip_text):
+    """One publish-ready SEO title: topical hashtag then its sequence number."""
+    if type(number) is not int or not 1 <= number <= 9999:
+        raise ValueError("REEL_INVALID_SEQUENTIAL_NUMBER")
+    candidates = [t for t in hashtags if t not in ("#شورتس", "#شرح", "#فيديو")]
+    hashtag = candidates[0] if candidates else ""
+    suffix = ((" " + hashtag) if hashtag else "") + " " + str(number)
+    words = base_title.split()
+    while words and len(" ".join(words)) + len(suffix) > 100:
+        words.pop()
+    core = " ".join(words)
+    if not valid_title(core, clip_text):
+        raise ValueError("REEL_SEO_NUMBERED_TITLE_INVALID")
+    title = core + suffix
+    if not title.endswith(" " + str(number)) or len(title) > 100:
+        raise ValueError("REEL_SEO_NUMBERED_TITLE_OVER_100")
+    return title
+
+
+def generate_reel_metadata(cues, start, end, suggested_title, api_key=None, clip_number=None):
     clip_text = clip_transcript(cues, start, end)
     whole_text = full_video_context(cues)
     prompt = (
@@ -157,9 +167,8 @@ def generate_reel_metadata(cues, start, end, suggested_title, api_key=None):
         "المنصة والموضوع والجمهور والمصطلحات، ثم ركّز حصريًا على محتوى المقطع "
         f"من الثانية {start} إلى {end}. لا تختلق أي تفاصيل من سياق الفيديو "
         "الكامل لم تظهر أو تُشرح في المقطع المحدد. "
-        "اكتب عنوانًا رئيسيًا يصلح للبحث، واضحًا ومحددًا (حتى 100 حرف)، "
-        "وثلاثة عناوين طويلة وثلاثة قصيرة، كل عنوان لا يتجاوز 100 حرف، "
-        "وجميع العناوين مرتبطة بكلمات منطوقة فعلًا في المقطع. "
+        "اكتب عنوان نشر واحدًا فقط، واضحًا للبحث، مرتبطًا بكلمات منطوقة فعلاً "
+        "في المقطع ومن دون حشو أو تكرار، حتى 85 حرفًا قبل إضافة الهاشتاغ والرقم. "
         "اكتب 3 جمل وصفية موجزة مفيدة للبحث (description_lines) كجمل سليمة، "
         "لا تنسخ التفريغ حرفيًا أو تقسمه لأسطر عشوائية. "
         "أضف 3 إلى 6 هاشتاغات ذات صلة حقيقة بالموضوع، منها عام ومتخصص، "
@@ -169,15 +178,19 @@ def generate_reel_metadata(cues, start, end, suggested_title, api_key=None):
         "مجموع الأحرف مع الفواصل وعلامات الاقتباس الضمنية لعبارات متعددة الكلمات "
         "لا يتجاوز 500 حرف. "
         "لا تذكر رابط المصدر، ولا تخترع تاريخ تصوير أو نشر أو بلد دعم أو رسوم. "
-        "أعد JSON بهذه المفاتيح فقط: title, long_titles (3), short_titles (3), "
-        "description_lines (3), hashtags (3-6), keywords (6-20). "
+        "أعد JSON بهذه المفاتيح فقط: title, description_lines (3), "
+        "hashtags (3-6), keywords (6-20). لا تقدم عناوين بديلة. "
         "اقتراح سابق غير موثوق؛ لا تنسخه لو مبتور: " + str(suggested_title or "") +
         "\n\nسياق تفريغ الفيديو الكامل:\n" + whole_text +
         "\n\nالكلام الحقيقي داخل الريلز المختار فقط:\n" + clip_text
     )
 
     def checked(payload):
-        return _validate(payload, clip_text=clip_text, full_context=whole_text)
+        result = _validate(payload, clip_text=clip_text, full_context=whole_text)
+        if clip_number is not None:
+            result["title"] = numbered_seo_title(
+                result["title"], result["hashtags"], clip_number, clip_text)
+        return result
 
     try:
         result, model = generate_json(

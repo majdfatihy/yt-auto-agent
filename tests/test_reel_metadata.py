@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from reel_metadata import (
     clip_transcript, full_video_context, parse_youtube_tags,
-    youtube_tag_cost, generate_reel_metadata, _validate,
+    youtube_tag_cost, generate_reel_metadata, numbered_seo_title, _validate,
 )
 
 CUES = [
@@ -55,16 +55,24 @@ class ReelMetadataTests(unittest.TestCase):
             prompts.append(prompt)
             return validator(SEO), 'groq:openai/gpt-oss-120b'
         with patch('reel_metadata.generate_json', side_effect=fake_generate):
-            result = generate_reel_metadata(CUES, 0, 18, 'مقتطف: باي', '')
+            result = generate_reel_metadata(CUES, 0, 18, 'مقتطف: باي', '', clip_number=2)
         self.assertIn('موضوع تاني', prompts[0])
         self.assertIn('الكلام الحقيقي داخل الريلز المختار فقط', prompts[0])
         self.assertEqual(result['method'], 'groq:openai/gpt-oss-120b')
         self.assertEqual(len(result['description'].splitlines()), 4)
-        self.assertEqual(len(result['long_titles']), 3)
-        self.assertEqual(len(result['short_titles']), 3)
+        self.assertTrue(result['title'].endswith(' #تلدا 2'))
+        self.assertLessEqual(len(result['title']), 100)
+        self.assertNotIn('long_titles', result)
         self.assertIn('#تلدا', result['description'])
         self.assertGreaterEqual(len(parse_youtube_tags(result['tags_string'])), 6)
         self.assertLessEqual(youtube_tag_cost(parse_youtube_tags(result['tags_string'])), 500)
+
+    def test_long_title_truncated_by_words_before_hashtag_and_number(self):
+        long_title = 'طريقة شحن كارت تلدا باستخدام إنستا باي ' * 5
+        result = numbered_seo_title(long_title, ['#تلدا', '#شورتس'], 17,
+            clip_transcript(CUES, 0, 18))
+        self.assertLessEqual(len(result), 100)
+        self.assertTrue(result.endswith('#تلدا 17'))
 
     def test_tags_include_multiword_quote_cost(self):
         self.assertEqual(youtube_tag_cost(['تحويل دولي', 'فودافون']), 10 + 2 + 1 + 7)
