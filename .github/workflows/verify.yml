@@ -29,6 +29,7 @@ jobs:
           node tests/test_worker_approval.mjs
           node tests/test_worker_buttons.mjs
           node tests/test_worker_webhook.mjs
+          node tests/test_worker_fastpath.mjs
       - name: Publishing offline tests
         run: |
           python -m pip install requests
