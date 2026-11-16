@@ -149,7 +149,7 @@ const PAGE_SIZE = 5;
 const DEFAULT_OPTS = {captions:true,blur:'auto',privacy:'public',max_seconds:59};
 function topicPlan(p) {return p?.method === 'topic_transcript_ai';}
 function clipJob(p,id) {return p?.clip_jobs?.[String(id)]||null;}
-function openClips(p) {return (p?.clips||[]).filter(c=>!['pending','queued','uploading','published','needs_review'].includes(clipJob(p,c.id)?.state));}
+function openClips(p) {return (p?.clips||[]).filter(c=>!['pending','queued','uploading','published','needs_review','dispatch_unknown'].includes(clipJob(p,c.id)?.state));}
 async function preferences(env) {
   try {const o=JSON.parse(await env.BOT_STATE.get('settings:'+env.TELEGRAM_CHAT_ID)||'null');
     return {...DEFAULT_OPTS,...(o&&typeof o==='object'?o:{})};}
@@ -388,14 +388,21 @@ async function queueTopicJobs(env,source,original,chosen,scheduled=null) {
         clip_ids:ids.join(','),clip_plan_ref:plan.created_utc
       });
     } catch (err) {
+      // An HTTP/network failure after dispatch may still mean GitHub accepted
+      // the event. Lock unresolved jobs rather than making them re-selectable.
       const latest=await readPlan(env);
       if(latest?.created_utc===plan.created_utc) {
-        for(const id of ids)
-          if(latest.clip_jobs?.[String(id)]?.state==='queued')
-            delete latest.clip_jobs[String(id)];
+        for(const id of ids) {
+          const job=latest.clip_jobs?.[String(id)];
+          if(job?.state==='queued') {
+            job.state='dispatch_unknown';
+            job.error=String(err?.message||err).slice(0,160);
+          }
+        }
         await writePlan(env,latest);
       }
-      throw err;
+      await send(env,'⚠️ تعذر تأكيد إرسال أمر الرفع إلى GitHub. أوقفت إعادة المحاولة التلقائية لمنع نشر مكرر؛ راجع /status.');
+      return;
     }
     return send(env,'🚀 تم اعتماد وإرسال أمر الرفع العلني/الخاص حسب إعداد كل ريلز: '+
       ids.join('، ')+'. بدون تأكيد ثانٍ. نتيجة كل رفع ستصل هنا.');
