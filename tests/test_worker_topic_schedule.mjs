@@ -23,6 +23,7 @@ let plan={method:'topic_transcript_ai',version:3,status:'awaiting_selection',
   transcript_chunks:1,transcript_sha256:sha};
 const kv=new Map([['source:999',JSON.stringify(source)]]);
 const sent=[],dispatches=[];
+let failNextDispatch=false;
 globalThis.fetch=async(url,opts={})=>{
   if(url.startsWith('https://api.telegram.org/')){
     const name=url.split('/').at(-1),json=JSON.parse(opts.body||'{}');
@@ -38,7 +39,10 @@ globalThis.fetch=async(url,opts={})=>{
   }
   if(url.endsWith('/actions/variables/TELEGRAM_REEL_TEXT_0'))
     return Response.json({value:b64});
-  if(url.endsWith('/dispatches')){dispatches.push(JSON.parse(opts.body));return new Response(null,{status:204});}
+  if(url.endsWith('/dispatches')){
+    if(failNextDispatch){failNextDispatch=false;return new Response('unavailable',{status:504});}
+    dispatches.push(JSON.parse(opts.body));return new Response(null,{status:204});
+  }
   throw Error('Unexpected URL '+url);
 };
 const env={TELEGRAM_CHAT_ID:'999',TELEGRAM_OWNER_ID:'999',
@@ -103,4 +107,12 @@ await msg('/stop');
 assert.equal(plan.clip_jobs['2'].state,'cancelled');
 assert.equal(plan.clip_jobs['3'].state,'cancelled');
 assert.equal(plan.clip_jobs['1'].state,'queued');
-console.log('Transcript detail, title edits, per-reel settings, batch schedules, due dispatch and safe stop passed.');
+// HTTP failure may happen after GitHub accepted a dispatch. Lock and do not retry.
+plan={...plan,created_utc:'2026-11-17T00:00:00Z',clip_jobs:{},schedule_paused:false};
+failNextDispatch=true;
+await msg('/publishnow 1');
+assert.equal(plan.clip_jobs['1'].state,'dispatch_unknown');
+assert.equal(dispatches.length,1);
+await msg('/publishnow 1');
+assert.equal(dispatches.length,1,'same reel must never be re-dispatched after ambiguous response');
+console.log('Topic management, schedules and ambiguous publishing safety passed.');
