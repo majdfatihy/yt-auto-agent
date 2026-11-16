@@ -130,8 +130,8 @@ async function controls(env, source, plan) {
     rows.push([{text: '🎞️ معاينة المقاطع المختارة (' + chosen.length + ')',
                 callback_data: 'p:preview:' + hash}]);
     if (plan.status === 'previewed_awaiting_approval' && previewIds(plan).length) {
-      rows.push([{text: '✅ اعتماد المعاينة ' + previewIds(plan).join('،'),
-                  callback_data: 'p:approve:' + hash + ':' + plan.preview_run_id}]);
+      rows.push([{text: '✅ موافق: اعتماد ونشر خاص للمقطع ' + previewIds(plan).join('،'),
+                  callback_data: 'p:approvepublish:' + hash + ':' + plan.preview_run_id}]);
     }
   } else if (plan.status === 'approved') {
     rows.push([{text: '🔒 تأكيد النشر الخاص', callback_data: 'p:publish:' + hash}]);
@@ -147,7 +147,7 @@ async function controls(env, source, plan) {
 }
 const LABELS = {
   awaiting_selection: 'اختر المقاطع ثم اضغط معاينة',
-  previewed_awaiting_approval: 'المعاينة جاهزة — اختار اعتماد المقطع الصحيح',
+  previewed_awaiting_approval: 'المعاينة جاهزة — اضغط موافق للنشر الخاص بعد مراجعتها',
   approved: 'معتمد، ولم يُنشر بعد',
   publish_queued: 'طلب النشر قيد التنفيذ',
   publishing: 'النشر قيد التنفيذ أو بحاجة لمراجعة نتيجة آخر تشغيل',
@@ -287,6 +287,29 @@ async function handleCallback(env, cb) {
       await dispatch(env, plan, 'preview',
         {clip_ids: ids.join(','), clip_plan_ref: plan.created_utc});
       return send(env, '⏳ بدأت معاينة: ' + ids.join('، ') + '. بدون نشر.');
+    }
+    if (pieces[1] === 'approvepublish') {
+      // One explicit owner action AFTER the video+SEO preview. Sending a link
+      // can never cause a YouTube upload.
+      if (plan.status !== 'previewed_awaiting_approval' || !previewIds(plan).length)
+        throw Error('لا توجد معاينة جاهزة للموافقة والنشر.');
+      if (pieces[3] !== String(plan.preview_run_id))
+        throw Error('زر قديم. افتح القائمة لمعاينة النسخة الأحدث.');
+      const ids = previewIds(plan);
+      if (!ids.every(id => plan.clips.some(c => c.id === id)))
+        throw Error('المعاينة لا تطابق المقطع المحفوظ.');
+      await requirePreviewArtifact(env, plan);
+      const latest = await readPlan(env);
+      if (!latest || latest.status !== 'previewed_awaiting_approval' ||
+          latest.created_utc !== plan.created_utc ||
+          String(latest.preview_run_id) !== String(plan.preview_run_id) ||
+          JSON.stringify(previewIds(latest)) !== JSON.stringify(ids))
+        throw Error('هذه المعاينة اتعمدت أو اتغيرت بالفعل؛ لا تكرر الرفع.');
+      latest.approved_ids = ids;
+      latest.approval_utc = new Date().toISOString();
+      latest.status = 'approved';
+      await writePlan(env, latest);
+      return publishPlan(env, source, latest);
     }
     if (pieces[1] === 'approve') {
       if (plan.status !== 'previewed_awaiting_approval' || !previewIds(plan).length)
@@ -476,17 +499,27 @@ async function processUpdate(env, update) {
     }
     await dispatch(env, selected, cmd.slice(1));
     return send(env, cmd === '/seo' ? 'تم طلب البيانات الوصفية فقط، دون نشر.' :
-      'تم طلب اقتراح توقيتات فقط، دون قص أو نشر.');
+      'جارٍ تجهيز أفضل ريلز ومعاينته وبيانات SEO تلقائيًا؛ دون نشر.');
   }
   if (link) {
     const existing = await readPlan(env);
     if (['publish_queued', 'publishing'].includes(existing?.status))
       return send(env, 'هناك نشر قيد التنفيذ؛ لا يمكن تغيير المصدر الآن.');
     if (media && (media.file_size || 0) > MAX_MP4) return send(env, 'ملف MP4 أكبر من حد التنزيل 20MB.');
+    const nextSource = {video_url: link, telegram_file_id: media?.file_id || ''};
+    if (sameSource(nextSource, source) && !existing?.clips?.length &&
+        Number(source.auto_prepare_requested_at) > 0 &&
+        Date.now() - Number(source.auto_prepare_requested_at) < 10 * 60 * 1000)
+      return send(env, 'الرابط ده بيتم تجهيزه بالفعل. المعاينة هتوصلك تلقائيًا؛ مفيش حاجة تانية مطلوبة.');
+    if (sameSource(nextSource, existing || {}) &&
+        ['awaiting_selection', 'previewed_awaiting_approval', 'approved'].includes(existing?.status))
+      return send(env, 'الفيديو ده تم تحليله بالفعل. افتح /menu لعرض آخر معاينة أو الخيارات.');
     await clearPlan(env);
-    await env.BOT_STATE.put(key, JSON.stringify(
-      {video_url: link, telegram_file_id: media?.file_id || ''}));
-    return showMenu(env, {video_url: link, telegram_file_id: media?.file_id || ''}, null, '✅ تم حفظ المصدر، بدون تحليل أو نشر.');
+    await env.BOT_STATE.put(key, JSON.stringify({
+      ...nextSource, auto_prepare_requested_at: Date.now()
+    }));
+    await dispatch(env, nextSource, 'prepare');
+    return send(env, 'وصل الرابط. هيتم اختيار أفضل مقطع وتجهيز الفيديو وSEO تلقائيًا. مفيش نشر قبل موافقتك.');
   }
   if (media) return send(env, 'وصل MP4 بدون رابط. أضف رابط يوتيوب في تعليق الملف أو رد عليه بالرابط.');
   if (text) return showMenu(env, source, await readPlan(env), 'الأمر غير معروف؛ استخدم الأزرار.');

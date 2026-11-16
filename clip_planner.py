@@ -182,13 +182,22 @@ def build_clip_plan(video_url, telegram_file_id, timed_cues, duration, gemini_ke
     # Never fill missing AI proposals with the first words of unrelated sentences.
     if not suggestions:
         raise RuntimeError("CLIP_TITLES_UNAVAILABLE: لم ينتج تحليل الفيديو عناوين صالحة للمقاطع")
+    # The model ranks options before we reorder them chronologically for display.
+    # Preserve its top choice for the automatic preview instead of choosing
+    # the earliest (which is often just the video's introduction).
+    top_candidate = suggestions[0]
     suggestions = sorted(suggestions, key=lambda x: x["start_time"])
     clips = [{"id": index, **proposal} for index, proposal in enumerate(suggestions, 1)]
+    recommended_clip_id = next(
+        c["id"] for c in clips
+        if (c["start_time"], c["end_time"]) ==
+           (top_candidate["start_time"], top_candidate["end_time"]))
     plan = {"version": 1, "status": "awaiting_selection", "video_url": video_url,
             "telegram_file_id": telegram_file_id, "duration": round(duration, 1),
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "method": ("groq" if any(item.get("_ai_provider") == "groq"
                                   for item in gemini_options) else "gemini"),
+            "recommended_clip_id": recommended_clip_id,
             "clips": clips}
     return plan
 

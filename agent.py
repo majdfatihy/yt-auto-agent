@@ -134,9 +134,9 @@ def _proposals_keyboard(plan):
 def _preview_keyboard(plan, chosen_ids):
     ref = _ui_fingerprint(plan)
     return {'inline_keyboard': [
-        [{'text': '✅ اعتماد المقاطع ' + '، '.join(map(str, chosen_ids)),
-          'callback_data': f'p:approve:{ref}:{os.getenv("GITHUB_RUN_ID", "")}'}],
-        [{'text': '🎬 اختيار مقاطع أخرى', 'callback_data': f'p:menu:{ref}'}]
+        [{'text': '✅ موافق: اعتماد ونشر خاص للمقطع ' + '، '.join(map(str, chosen_ids)),
+          'callback_data': f'p:approvepublish:{ref}:{os.getenv("GITHUB_RUN_ID", "")}'}],
+        [{'text': '🎬 تجربة مقطع آخر', 'callback_data': f'p:menu:{ref}'}]
     ]}
 
 
@@ -469,6 +469,112 @@ def upload_to_youtube(video_path, title, description, tags_str):
 # ==========================================
 # 7. نقطة التشغيل الرئيسية (Main Execution)
 # ==========================================
+def prepare_selected_previews(plan, chosen_ids, expected_ref):
+    """Prepare verified, captioned previews in this same GitHub Actions run.
+
+    The user must still explicitly authorize any YouTube upload.
+    """
+    clips_by_id = {item['id']: item for item in plan['clips']}
+    if AGENT_ACTION == 'preview':
+        send_telegram('بدأ تجهيز معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)))
+    # During automatic /prepare, the original source is already downloaded.
+    # Do not fetch the same Google Drive/Telegram video for a second time.
+    cached_source = os.getenv('SOURCE_VIDEO_FILE', '').strip()
+    if not cached_source or not Path(cached_source).is_file():
+        fetch_telegram_source()
+        fetch_drive_source()
+    preview_dir = Path('previews')
+    preview_dir.mkdir(exist_ok=True)
+    preview_manifest = {'plan_ref': expected_ref, 'preview_run_id': os.getenv('GITHUB_RUN_ID', ''),
+                        'video_url': VIDEO_URL, 'telegram_file_id': TELEGRAM_FILE_ID,
+                        'previewed_ids': chosen_ids, 'files': {}}
+    preview_cues = None  # One local-source transcription for all chosen clips.
+    preview_metadata = {}
+    source_facts = None
+    for clip_id in chosen_ids:
+        if plan_reference(load_clip_plan()) != expected_ref:
+            raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
+        clip = clips_by_id[clip_id]
+        download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'])
+        if preview_cues is None:
+            # Stage 3: trust the audio of the MP4 being cut, never title-only text.
+            preview_cues, preview_source = obtain_timed_transcript(
+                VIDEO_URL, video_path='input.mp4', cookies_file=COOKIES_FILE,
+                prefer_local_audio=True, prefer_word_timestamps=True)
+            if not preview_cues:
+                raise RuntimeError('CAPTIONS_UNAVAILABLE: no timed transcription for the selected source; cannot send an uncaptioned preview')
+            print(f'PREVIEW_TRANSCRIPTION: {preview_source}; CUES: {len(preview_cues)}')
+            # Validate manual edits against the original ASR words first.
+            original_cues = preview_cues
+            approved_cues = apply_approved_edits(original_cues, VIDEO_URL)
+            # Audio-grounded proofread: Gemini -> Deepgram -> AssemblyAI.
+            reviewed_cues = proofread_timed_cues(original_cues)
+            # Manual edits win even if Gemini changed their original words.
+            preview_cues = preserve_approved_word_edits(original_cues, reviewed_cues, approved_cues)
+            # Read original YouTube dates from the official API only if a
+            # YouTube link is the source; Drive never implies an upload date.
+            youtube_client = None
+            if original_youtube_id(VIDEO_URL) and all((
+                    YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN)):
+                try:
+                    auth = Credentials(
+                        None, refresh_token=YT_REFRESH_TOKEN,
+                        token_uri="https://oauth2.googleapis.com/token",
+                        client_id=YT_CLIENT_ID,
+                        client_secret=YT_CLIENT_SECRET)
+                    youtube_client = build("youtube", "v3", credentials=auth)
+                except Exception as exc:
+                    print("SOURCE_YOUTUBE_METADATA_UNAVAILABLE: " + type(exc).__name__)
+            source_facts = read_source_facts(
+                VIDEO_URL, cues_to_text(preview_cues), youtube_client)
+        captioned_preview = burn_captions(
+            'output_reel.mp4', preview_cues, clip['start_time'], clip['end_time'])
+        # Fail closed on broken dimensions, before offering or approving a preview.
+        dimensions = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=width,height', '-of', 'json',
+             captioned_preview],
+            check=True, capture_output=True, text=True, timeout=30)
+        streams = json.loads(dimensions.stdout).get('streams', [])
+        if len(streams) != 1 or streams[0].get('width') != 1080 or streams[0].get('height') != 1920:
+            raise RuntimeError('REEL_DIMENSIONS_INVALID: expected 1080x1920')
+        reel_meta = generate_reel_metadata(
+            preview_cues, clip['start_time'], clip['end_time'],
+            clip['title'], GEMINI_KEY)
+        preview_metadata[str(clip_id)] = reel_meta
+        # Reuse input.mp4 in this same runner for any subsequent selection.
+        if Path('input.mp4').is_file():
+            os.environ['SOURCE_VIDEO_FILE'] = str(Path('input.mp4').resolve())
+        stamp_start = f"{clip['start_time']:.1f}"
+        stamp_end = f"{clip['end_time']:.1f}"
+        send_telegram_video(captioned_preview,
+                            f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
+        send_telegram(
+            f"بيانات الريلز {clip_id} قبل الاعتماد:\n"
+            f"العنوان الأساسي للنشر: {reel_meta['title']}\n\n"
+            "3 عناوين طويلة مقترحة:\n" +
+            "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['long_titles'], 1)) +
+            "\n\n3 عناوين قصيرة مقترحة:\n" +
+            "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['short_titles'], 1)) +
+            f"\n\nالوصف والهاشتاغات (بلوك واحد):\n{reel_meta['description']}\n\n"
+            f"الكلمات المفتاحية ({len(reel_meta['tags_string'])} حرف):\n"
+            f"{reel_meta['tags_string']}\n\n"
+            + preview_fact_lines(source_facts))
+        stored = preview_dir / f'clip-{clip_id}.mp4'
+        shutil.copyfile(captioned_preview, stored)
+        preview_manifest['files'][str(clip_id)] = hashlib.sha256(stored.read_bytes()).hexdigest()
+        print(f"CLIP_PREVIEW: ID={clip_id}; START={stamp_start}; END={stamp_end}; CAPTIONS_BURNED=YES; DELIVERED=YES")
+    if not preview_manifest['preview_run_id'].isdigit():
+        raise RuntimeError('PREVIEW_RUN_ID_MISSING')
+    (preview_dir / 'manifest.json').write_text(
+        json.dumps(preview_manifest, ensure_ascii=False), encoding='utf-8')
+    record_preview_result(expected_ref, chosen_ids, preview_manifest['preview_run_id'],
+                          preview_metadata)
+    send_telegram('✅ المعاينة والبيانات جاهزة للمراجعة للمقطع ' + '، '.join(map(str, chosen_ids)) +
+                  '. إذا كانت مناسبة، اضغط موافق: اعتماد ونشر خاص. لم يتم النشر.',
+                  reply_markup=_preview_keyboard(plan, chosen_ids))
+
+
 if __name__ == "__main__":
     try:
         if not VIDEO_URL:
@@ -496,103 +602,11 @@ if __name__ == "__main__":
             if VIDEO_URL != plan.get('video_url') or TELEGRAM_FILE_ID != plan.get('telegram_file_id', ''):
                 raise RuntimeError('CLIP_SOURCE_MISMATCH: request and saved plan have different sources')
             chosen_ids = parse_clip_choices(os.getenv('CLIP_IDS', ''), plan)
-            clips_by_id = {item['id']: item for item in plan['clips']}
-            send_telegram('بدأ تجهيز معاينة المقاطع: ' + ', '.join(map(str, chosen_ids)))
-            fetch_telegram_source()
-            fetch_drive_source()
-            preview_dir = Path('previews')
-            preview_dir.mkdir(exist_ok=True)
-            preview_manifest = {'plan_ref': expected_ref, 'preview_run_id': os.getenv('GITHUB_RUN_ID', ''),
-                                'video_url': VIDEO_URL, 'telegram_file_id': TELEGRAM_FILE_ID,
-                                'previewed_ids': chosen_ids, 'files': {}}
-            preview_cues = None  # One local-source transcription for all chosen clips.
-            preview_metadata = {}
-            source_facts = None
-            for clip_id in chosen_ids:
-                if plan_reference(load_clip_plan()) != expected_ref:
-                    raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
-                clip = clips_by_id[clip_id]
-                download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'])
-                if preview_cues is None:
-                    # Stage 3: trust the audio of the MP4 being cut, never title-only text.
-                    preview_cues, preview_source = obtain_timed_transcript(
-                        VIDEO_URL, video_path='input.mp4', cookies_file=COOKIES_FILE,
-                        prefer_local_audio=True, prefer_word_timestamps=True)
-                    if not preview_cues:
-                        raise RuntimeError('CAPTIONS_UNAVAILABLE: no timed transcription for the selected source; cannot send an uncaptioned preview')
-                    print(f'PREVIEW_TRANSCRIPTION: {preview_source}; CUES: {len(preview_cues)}')
-                    # Validate manual edits against the original ASR words first.
-                    original_cues = preview_cues
-                    approved_cues = apply_approved_edits(original_cues, VIDEO_URL)
-                    # Audio-grounded proofread: Gemini -> Deepgram -> AssemblyAI.
-                    reviewed_cues = proofread_timed_cues(original_cues)
-                    # Manual edits win even if Gemini changed their original words.
-                    preview_cues = preserve_approved_word_edits(original_cues, reviewed_cues, approved_cues)
-                    # Read original YouTube dates from the official API only if a
-                    # YouTube link is the source; Drive never implies an upload date.
-                    youtube_client = None
-                    if original_youtube_id(VIDEO_URL) and all((
-                            YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN)):
-                        try:
-                            auth = Credentials(
-                                None, refresh_token=YT_REFRESH_TOKEN,
-                                token_uri="https://oauth2.googleapis.com/token",
-                                client_id=YT_CLIENT_ID,
-                                client_secret=YT_CLIENT_SECRET)
-                            youtube_client = build("youtube", "v3", credentials=auth)
-                        except Exception as exc:
-                            print("SOURCE_YOUTUBE_METADATA_UNAVAILABLE: " + type(exc).__name__)
-                    source_facts = read_source_facts(
-                        VIDEO_URL, cues_to_text(preview_cues), youtube_client)
-                captioned_preview = burn_captions(
-                    'output_reel.mp4', preview_cues, clip['start_time'], clip['end_time'])
-                # Fail closed on broken dimensions, before offering or approving a preview.
-                dimensions = subprocess.run(
-                    ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                     '-show_entries', 'stream=width,height', '-of', 'json',
-                     captioned_preview],
-                    check=True, capture_output=True, text=True, timeout=30)
-                streams = json.loads(dimensions.stdout).get('streams', [])
-                if len(streams) != 1 or streams[0].get('width') != 1080 or streams[0].get('height') != 1920:
-                    raise RuntimeError('REEL_DIMENSIONS_INVALID: expected 1080x1920')
-                reel_meta = generate_reel_metadata(
-                    preview_cues, clip['start_time'], clip['end_time'],
-                    clip['title'], GEMINI_KEY)
-                preview_metadata[str(clip_id)] = reel_meta
-                # Reuse input.mp4 in this same runner for any subsequent selection.
-                if Path('input.mp4').is_file():
-                    os.environ['SOURCE_VIDEO_FILE'] = str(Path('input.mp4').resolve())
-                stamp_start = f"{clip['start_time']:.1f}"
-                stamp_end = f"{clip['end_time']:.1f}"
-                send_telegram_video(captioned_preview,
-                                    f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
-                send_telegram(
-                    f"بيانات الريلز {clip_id} قبل الاعتماد:\n"
-                    f"العنوان الأساسي للنشر: {reel_meta['title']}\n\n"
-                    "3 عناوين طويلة مقترحة:\n" +
-                    "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['long_titles'], 1)) +
-                    "\n\n3 عناوين قصيرة مقترحة:\n" +
-                    "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['short_titles'], 1)) +
-                    f"\n\nالوصف والهاشتاغات (بلوك واحد):\n{reel_meta['description']}\n\n"
-                    f"الكلمات المفتاحية ({len(reel_meta['tags_string'])} حرف):\n"
-                    f"{reel_meta['tags_string']}\n\n"
-                    + preview_fact_lines(source_facts))
-                stored = preview_dir / f'clip-{clip_id}.mp4'
-                shutil.copyfile(captioned_preview, stored)
-                preview_manifest['files'][str(clip_id)] = hashlib.sha256(stored.read_bytes()).hexdigest()
-                print(f"CLIP_PREVIEW: ID={clip_id}; START={stamp_start}; END={stamp_end}; CAPTIONS_BURNED=YES; DELIVERED=YES")
-            if not preview_manifest['preview_run_id'].isdigit():
-                raise RuntimeError('PREVIEW_RUN_ID_MISSING')
-            (preview_dir / 'manifest.json').write_text(
-                json.dumps(preview_manifest, ensure_ascii=False), encoding='utf-8')
-            record_preview_result(expected_ref, chosen_ids, preview_manifest['preview_run_id'],
-                                  preview_metadata)
-            send_telegram('✅ اكتملت معاينة المقاطع ' + '، '.join(map(str, chosen_ids)) +
-                          '. راجع الفيديوهات، ثم استخدم زر الاعتماد. لم يتم النشر.',
-                          reply_markup=_preview_keyboard(plan, chosen_ids))
+            prepare_selected_previews(plan, chosen_ids, expected_ref)
             raise SystemExit(0)
 
-        send_telegram(f"⏳ بدأ الوكيل مهمة {AGENT_ACTION} للفيديو:\n{VIDEO_URL}")
+        if AGENT_ACTION == 'seo':
+            send_telegram(f"⏳ بدأ الوكيل مهمة SEO للفيديو:\n{VIDEO_URL}")
 
         fetch_telegram_source()
         fetch_drive_source()
@@ -613,7 +627,8 @@ if __name__ == "__main__":
                           if is_drive_url(VIDEO_URL) else get_transcript(vid_id, VIDEO_URL))
             print("TIMED_TRANSCRIPT: UNAVAILABLE; TITLE_ONLY_FALLBACK: YES")
 
-        # Stage 1: /prepare lists options ONLY. Never create MP4 or generate SEO here.
+        # One GitHub run now prepares, picks the AI-ranked clip, and sends
+        # the complete preview automatically; no extra /clip command required.
         if AGENT_ACTION == 'prepare':
             if not timing_grounded:
                 send_telegram('⛔ لا يمكن اقتراح قص موثوق بدون تفريغ مؤقت للكلام. أرسل MP4 مع رابطه.')
@@ -621,13 +636,10 @@ if __name__ == "__main__":
             duration = source_duration(local_source or None, timed_cues)
             plan = build_clip_plan(VIDEO_URL, TELEGRAM_FILE_ID, timed_cues, duration, GEMINI_KEY)
             save_clip_plan(plan)
-            summary = '✅ اقتراحات المقاطع جاهزة. اختار من الأزرار ثم اطلب المعاينة.\n'
-            summary += '\n'.join(
-                f"{clip['id']}. {clip['title']} ({round(clip['start_time'])}–{round(clip['end_time'])}ث)"
-                for clip in plan['clips'])
-            if plan.get('method') == 'timed_transcript_fallback':
-                summary += '\nبعض العناوين مقتطفات حرفية من التفريغ.'
-            send_telegram(summary, reply_markup=_proposals_keyboard(plan))
+            selected_id = plan.get('recommended_clip_id', plan['clips'][0]['id'])
+            prepare_selected_previews(plan, [selected_id], plan_reference(plan))
+            # The remaining proposals are still available from the existing menu,
+            # but do not require any extra step for the recommended reel.
             raise SystemExit(0)
 
         # /seo is the only command that requests descriptive metadata.
