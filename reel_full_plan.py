@@ -88,8 +88,10 @@ def build_remaining_plan(video_url, telegram_file_id, timed_cues, duration, hist
                 truncated.append([a, b])
                 continue
             idx = len(clips) + 1
+            serial = len(published) + idx
             clips.append({
-                "id": idx, "title": f"الريلز {idx}: {int(a)}–{int(b)} ثانية من الفيديو",
+                "id": idx, "serial": serial,
+                "title": f"الريلز {serial}: {int(a)}–{int(b)} ثانية من الفيديو",
                 "start_time": a, "end_time": b,
                 "source_window_key": f"{a:.2f}:{b:.2f}",
             })
