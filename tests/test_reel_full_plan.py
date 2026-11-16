@@ -34,6 +34,6 @@ class FullVideoTest(unittest.TestCase):
 
     def test_published_windows_merge(self):
         gaps=remaining_intervals(220,[(25,55),(54.9,90),(135,165)])
-        self.assertEqual(gaps,[(90,135),(165,220)])
+        self.assertEqual(gaps,[(0.0,25),(90,135),(165,220)])
 
 if __name__=='__main__': unittest.main()
