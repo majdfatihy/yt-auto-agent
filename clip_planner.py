@@ -322,13 +322,25 @@ def record_preview_result(expected_reference, clip_ids, run_id=None, clip_metada
         value = clip_metadata.get(str(clip['id']))
         if not isinstance(value, dict):
             raise RuntimeError('REEL_METADATA_INVALID_FOR_PREVIEW')
+        from reel_metadata import parse_youtube_tags
+        from reel_title_quality import valid_title
         title, description = value.get('title'), value.get('description')
-        if not isinstance(title, str) or not 8 <= len(title) <= 100 or not isinstance(description, str) or not description.strip():
+        tags_string = value.get('tags_string')
+        if (not valid_title(title) or not isinstance(description, str)
+                or len(description.splitlines()) != 4
+                or not description.strip() or len(description.encode('utf-8')) > 5000
+                or re.search(r'https?://|youtu\.be|youtube\.com', description, re.I)):
             raise RuntimeError('REEL_METADATA_INVALID_FOR_PREVIEW')
-        if re.search(r'https?://|youtu\.be|youtube\.com', description, re.I):
-            raise RuntimeError('REEL_METADATA_SOURCE_LINK_PROHIBITED')
+        parse_youtube_tags(tags_string)
+        if value.get('language') != 'ar':
+            raise RuntimeError('REEL_METADATA_LANGUAGE_NOT_VALIDATED')
         clip['reel_title'] = title
         clip['reel_description'] = description
+        clip['reel_tags_string'] = tags_string
+        clip['reel_language'] = 'ar'
+        clip['reel_seo_version'] = 2
+        clip['reel_long_titles'] = value.get('long_titles', [])
+        clip['reel_short_titles'] = value.get('short_titles', [])
     latest['status'] = 'previewed_awaiting_approval'
     latest['previewed_ids'] = clip_ids
     latest['previewed_utc'] = datetime.now(timezone.utc).isoformat()

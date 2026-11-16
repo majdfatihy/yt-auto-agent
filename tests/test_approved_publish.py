@@ -22,7 +22,9 @@ def plan():
                 approved_ids=[1], approval_utc='2026-11-06T08:00:00Z',
                 clips=[dict(id=1, title='Clip One', start_time=0, end_time=30,
                             reel_title='شرح ريلز تجريبي',
-                            reel_description='شرح المقطع من التفريغ\\nتفاصيل حقيقية\\nخطوات مسموعة\\n#ريلز #شرح #فيديو')])
+                            reel_seo_version=2, reel_language='ar',
+                            reel_tags_string='شرح ريلز تجريبي,طريقة شرح الريلز,تجربة ريليز,مقاطع يوتيوب,شورتس عربي,خطوات ريلز',
+                            reel_description='شرح المقطع من التفريغ\nتفاصيل حقيقية\nخطوات مسموعة\n#ريلز #شرح #فيديو')])
 
 def archive_bytes(bad_sha=False):
     manifest=dict(plan_ref=REF, video_url=SOURCE, telegram_file_id='abc',
@@ -77,13 +79,14 @@ class ApprovalTests(unittest.TestCase):
         def read():return deepcopy(current)
         def save(new): current.clear();current.update(deepcopy(new));states.append(current['status'])
         def upload(path,title,desc,tags):
-            uploaded.append((Path(path).read_bytes(),title,desc))
+            uploaded.append((Path(path).read_bytes(),title,desc,tags))
             return '✅ يوتيوب: تم النشر بنجاح! (https://youtu.be/mock)'
         with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
             results=publish_approved_clips(REF,'1',SOURCE,'abc',read,save,upload,
                 notifications.append,downloader=lambda *args:{1:DATA})
         self.assertEqual(uploaded,[(DATA,'شرح ريلز تجريبي',
-                                    plan()['clips'][0]['reel_description'])])
+                                    plan()['clips'][0]['reel_description'],
+                                    plan()['clips'][0]['reel_tags_string'])])
         self.assertIn('#ريلز', uploaded[0][2])
         self.assertNotIn(SOURCE, uploaded[0][2])
         self.assertEqual(current['status'],'published')
@@ -109,6 +112,25 @@ class ApprovalTests(unittest.TestCase):
                 publish_approved_clips(REF,'1',SOURCE,'abc',lambda:p,lambda _:None,
                     lambda *_:self.fail('unexpected upload'),lambda _:None,
                     downloader=lambda *a:{1:DATA})
+
+    def test_legacy_plan_without_seo_version_cannot_publish(self):
+        p=plan()
+        del p['clips'][0]['reel_seo_version']
+        with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
+            with self.assertRaisesRegex(RuntimeError,'REEL_METADATA_NOT_PREVIEWED'):
+                publish_approved_clips(REF,'1',SOURCE,'abc',lambda:p,lambda _:None,
+                    lambda *_:self.fail('unexpected upload'),lambda _:None,
+                    downloader=lambda *a:{1:DATA})
+
+    def test_reject_missing_or_overlong_keyword_tags(self):
+        for bad in ('', 'كلمة' * 260):
+            p=plan()
+            p['clips'][0]['reel_tags_string']=bad
+            with patch.dict(os.environ,{'YT_CLIENT_ID':'a','YT_CLIENT_SECRET':'b','YT_REFRESH_TOKEN':'c'}):
+                with self.assertRaisesRegex(RuntimeError,'REEL_TAGS_NOT_PREVIEWED'):
+                    publish_approved_clips(REF,'1',SOURCE,'abc',lambda:p,lambda _:None,
+                        lambda *_:self.fail('unexpected upload'),lambda _:None,
+                        downloader=lambda *a:{1:DATA})
 
     def test_missing_credentials_does_not_reserve_or_upload(self):
         p=plan()
