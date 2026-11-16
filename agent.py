@@ -9,8 +9,10 @@ import traceback
 import time
 import shutil
 import hashlib
+from datetime import datetime, timezone
 from approved_publish import publish_approved_clips
-from reel_metadata import generate_reel_metadata
+from reel_metadata import generate_reel_metadata, parse_youtube_tags
+from source_video_info import original_youtube_id, read_source_facts, preview_fact_lines
 from text_ai import generate_json
 from youtube_source import download_youtube_video
 from drive_source import is_drive_url, download_drive_video
@@ -431,14 +433,15 @@ def upload_to_youtube(video_path, title, description, tags_str):
             client_secret=YT_CLIENT_SECRET
         )
         youtube = build("youtube", "v3", credentials=creds)
-        clean_tags = [t.strip() for t in tags_str[:490].split(",") if t.strip()]
+        clean_tags = parse_youtube_tags(tags_str)
 
         body = {
             "snippet": {
                 "title": title[:100],
                 "description": description,
                 "tags": clean_tags,
-                "categoryId": "22"
+                "categoryId": "22",
+                "defaultLanguage": "ar"
             },
             "status": {
                 "privacyStatus": os.getenv("YT_PRIVACY_STATUS", "private"),
@@ -451,7 +454,14 @@ def upload_to_youtube(video_path, title, description, tags_str):
         response = None
         while response is None:
             _, response = request.next_chunk()
-        return f"✅ يوتيوب: تم النشر بنجاح! (https://youtu.be/{response['id']})"
+        # Uploading a private video is not the same as publishing it publicly.
+        completed_utc = datetime.now(timezone.utc).isoformat()
+        original_api_stamp = response.get("snippet", {}).get("publishedAt")
+        details = ("وقت الرفع لدى يوتيوب: " + original_api_stamp) if original_api_stamp else (
+            "وقت اكتمال طلب الرفع (UTC): " + completed_utc)
+        return (f"✅ يوتيوب: تم رفع الفيديو بنجاح بوضع {body['status']['privacyStatus']} "
+                f"(https://youtu.be/{response['id']})\n"
+                f"{details}\nتاريخ النشر للعامة: غير محدد حتى جعله عامًا.")
     except Exception as e:
         return f"❌ يوتيوب خطأ: {str(e)}"
 
@@ -497,6 +507,7 @@ if __name__ == "__main__":
                                 'previewed_ids': chosen_ids, 'files': {}}
             preview_cues = None  # One local-source transcription for all chosen clips.
             preview_metadata = {}
+            source_facts = None
             for clip_id in chosen_ids:
                 if plan_reference(load_clip_plan()) != expected_ref:
                     raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
@@ -517,6 +528,22 @@ if __name__ == "__main__":
                     reviewed_cues = proofread_timed_cues(original_cues)
                     # Manual edits win even if Gemini changed their original words.
                     preview_cues = preserve_approved_word_edits(original_cues, reviewed_cues, approved_cues)
+                    # Read original YouTube dates from the official API only if a
+                    # YouTube link is the source; Drive never implies an upload date.
+                    youtube_client = None
+                    if original_youtube_id(VIDEO_URL) and all((
+                            YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN)):
+                        try:
+                            auth = Credentials(
+                                None, refresh_token=YT_REFRESH_TOKEN,
+                                token_uri="https://oauth2.googleapis.com/token",
+                                client_id=YT_CLIENT_ID,
+                                client_secret=YT_CLIENT_SECRET)
+                            youtube_client = build("youtube", "v3", credentials=auth)
+                        except Exception as exc:
+                            print("SOURCE_YOUTUBE_METADATA_UNAVAILABLE: " + type(exc).__name__)
+                    source_facts = read_source_facts(
+                        VIDEO_URL, cues_to_text(preview_cues), youtube_client)
                 captioned_preview = burn_captions(
                     'output_reel.mp4', preview_cues, clip['start_time'], clip['end_time'])
                 # Fail closed on broken dimensions, before offering or approving a preview.
@@ -541,8 +568,15 @@ if __name__ == "__main__":
                                     f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
                 send_telegram(
                     f"بيانات الريلز {clip_id} قبل الاعتماد:\n"
-                    f"العنوان: {reel_meta['title']}\n"
-                    f"الوصف والهاشتاغات:\n{reel_meta['description']}")
+                    f"العنوان الأساسي للنشر: {reel_meta['title']}\n\n"
+                    "3 عناوين طويلة مقترحة:\n" +
+                    "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['long_titles'], 1)) +
+                    "\n\n3 عناوين قصيرة مقترحة:\n" +
+                    "\n".join(f"{i}. {name}" for i, name in enumerate(reel_meta['short_titles'], 1)) +
+                    f"\n\nالوصف والهاشتاغات (بلوك واحد):\n{reel_meta['description']}\n\n"
+                    f"الكلمات المفتاحية ({len(reel_meta['tags_string'])} حرف):\n"
+                    f"{reel_meta['tags_string']}\n\n"
+                    + preview_fact_lines(source_facts))
                 stored = preview_dir / f'clip-{clip_id}.mp4'
                 shutil.copyfile(captioned_preview, stored)
                 preview_manifest['files'][str(clip_id)] = hashlib.sha256(stored.read_bytes()).hexdigest()
