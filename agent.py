@@ -384,7 +384,7 @@ def download_and_convert_to_reel(url, start_sec, end_sec, blur_mode='auto'):
     if not math.isfinite(start) or not math.isfinite(end):
         raise ValueError('Invalid reel interval: non-finite timestamp')
     duration = end - start
-    if start < 0 or start >= length or duration < 15 or duration > 59 or end > length + 0.15:
+    if start < 0 or start >= length or duration < 15 or duration > 180 or end > length + 0.15:
         raise ValueError(f'Invalid reel interval: start={start}, end={end}, source duration={length:.1f}')
     duration = min(duration, length-start)
     if duration < 14.9:
