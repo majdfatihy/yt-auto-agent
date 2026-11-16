@@ -85,14 +85,21 @@ function previewIds(plan) {
 }
 async function selection(env, plan) {
   const key = 'selection:' + String(env.TELEGRAM_CHAT_ID) + ':' + await planKey(plan);
-  let ids = [];
-  try { ids = JSON.parse(await env.BOT_STATE.get(key) || '[]'); } catch {}
+  let entry = [];
+  try { entry = JSON.parse(await env.BOT_STATE.get(key) || '[]'); } catch {}
+  // Invalidate old checkbox selections when a batch has been uploaded.
+  // IDs in older plans used to be stored as bare arrays.
+  const generation = plan.last_published_utc || '';
+  const ids = Array.isArray(entry) ? (generation ? [] : entry) :
+    entry?.generation === generation ? entry.ids : [];
   const allowed = new Set((plan.clips || []).map(clip => clip.id));
   return Array.isArray(ids) ? ids.filter(id => Number.isInteger(id) && allowed.has(id)) : [];
 }
 async function setSelection(env, plan, ids) {
   const key = 'selection:' + String(env.TELEGRAM_CHAT_ID) + ':' + await planKey(plan);
-  await env.BOT_STATE.put(key, JSON.stringify(ids), {expirationTtl: 1209600});
+  await env.BOT_STATE.put(key, JSON.stringify({
+    ids, generation: plan.last_published_utc || ''
+  }), {expirationTtl: 1209600});
 }
 function legacyOauthFailure(plan) {
   // The archived run 43767459446 failed at token refresh, before any upload.
@@ -101,6 +108,36 @@ function legacyOauthFailure(plan) {
     plan.preview_run_id === '43766799372' &&
     Array.isArray(plan.approved_ids) && plan.approved_ids.length === 1 &&
     plan.approved_ids[0] === 3 && !(plan.published_results || []).length;
+}
+function continuableClips(plan) {
+  if (plan?.status !== 'published' || !Array.isArray(plan?.clips)) return [];
+  const published = new Set((plan.published_results || [])
+    .filter(item => Number.isInteger(item?.clip_id) &&
+      /^✅/.test(item?.result || '') &&
+      /https:\/\/youtu\.be\/[A-Za-z0-9_-]{11}/.test(item.result))
+    .map(item => item.clip_id));
+  // Refuse to restore a historical plan without verified upload results.
+  if (!published.size) return [];
+  return plan.clips.filter(clip => !published.has(clip.id));
+}
+async function resumePublishedPlan(env, source, plan) {
+  if (!sameSource(source, plan)) throw Error('مصدر الريلز تغيّر.');
+  const latest = await readPlan(env);
+  if (latest?.status !== 'published' ||
+      latest.created_utc !== plan.created_utc)
+    throw Error('القائمة تغيرت. افتح /menu.');
+  const remaining = continuableClips(latest);
+  if (!remaining.length) throw Error('لا توجد ريلز متبقية موثقة من هذه القائمة.');
+  latest.clips = remaining;
+  latest.status = 'awaiting_selection';
+  latest.previewed_ids = [];
+  latest.preview_run_id = null;
+  latest.approved_ids = [];
+  latest.approval_utc = null;
+  latest.last_published_utc = new Date().toISOString();
+  latest.recommended_clip_id = remaining[0].id;
+  await writePlan(env, latest);
+  return latest;
 }
 function retriableAuthFailure(plan) {
   return (plan?.status === 'auth_failed' &&
@@ -143,6 +180,9 @@ async function controls(env, source, plan) {
     }
   } else if (plan.status === 'approved') {
     rows.push([{text: '🔒 تأكيد النشر الخاص', callback_data: 'p:publish:' + hash}]);
+  } else if (plan.status === 'published' && continuableClips(plan).length) {
+    rows.push([{text: '🎬 أكمل الريلز المتبقية من نفس الفيديو',
+                callback_data: 'p:continue:' + hash}]);
   } else if (retriableAuthFailure(plan)) {
     rows.push([{text: '🔑 إعادة المحاولة بعد تحديث OAuth', callback_data: 'p:retry:' + hash}]);
   }
@@ -277,6 +317,12 @@ async function handleCallback(env, cb) {
       throw Error('القائمة قديمة أو المصدر تغيّر. اطلب /menu.');
     if (pieces[1] === 'menu' || pieces[1] === 'status')
       return showMenu(env, source, plan, pieces[1] === 'status' ? '📊 حالة المعالجة' : '🎛️ القائمة', cb.message?.message_id);
+    if (pieces[1] === 'continue') {
+      const resumed = await resumePublishedPlan(env, source, plan);
+      return showMenu(env, source, resumed,
+        '🎬 الريلز المتبقية من نفس الفيديو — من غير إعادة تحليل.',
+        cb.message?.message_id);
+    }
     if (pieces[1] === 'toggle') {
       if (!['awaiting_selection', 'previewed_awaiting_approval'].includes(plan.status))
         throw Error('هذه القائمة لم تعد متاحة للتحديد.');
@@ -505,6 +551,17 @@ async function processUpdate(env, update) {
     }
     await writePlan(env, plan);
     return send(env,'تم تحديث تاريخ التسجيل الموثق للفيديو دون إعادة رفع.');
+  }
+  if (cmd === '/continue') {
+    try {
+      const plan = await readPlan(env);
+      if (!plan) throw Error('لا يوجد فيديو محفوظ؛ أرسل رابط الفيديو.');
+      if (plan.status === 'awaiting_selection' ||
+          plan.status === 'previewed_awaiting_approval')
+        return showMenu(env, source, plan, '🎬 الريلز المتبقية من نفس الفيديو.');
+      const resumed = await resumePublishedPlan(env, source, plan);
+      return showMenu(env, source, resumed, '🎬 اختر الريلز التالي من نفس المصدر.');
+    } catch (e) { return send(env, String(e.message || e)); }
   }
   if (cmd === '/approve') {
     try {

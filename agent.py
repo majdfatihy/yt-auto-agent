@@ -15,6 +15,7 @@ from reel_metadata import generate_reel_metadata, parse_youtube_tags
 from reel_full_plan import build_remaining_plan
 from reel_history import load_history, has_overlap, published_windows
 from source_video_info import original_youtube_id, read_source_facts, preview_fact_lines
+from telegram_reel_details import format_reel_details
 from text_ai import generate_json
 from youtube_source import download_youtube_video
 from drive_source import is_drive_url, download_drive_video
@@ -149,15 +150,19 @@ def _preview_keyboard(plan, chosen_ids):
     ]}
 
 
-def send_telegram(msg, reply_markup=None):
+def send_telegram(msg, reply_markup=None, parse_mode=None):
     """إرسال رسالة نصية إلى تيليجرام مع طباعتها في سجل GitHub"""
     print(msg)
     if not TG_TOKEN or not TG_CHAT_ID:
         print("⚠️ تنبيه: مفاتيح تيليجرام غير موجودة في Secrets!")
         return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    if parse_mode and len(msg) > 4000:
+        raise RuntimeError('TELEGRAM_FORMATTED_MESSAGE_TOO_LONG')
     for i in range(0, len(msg), 4000):
         payload = {"chat_id": TG_CHAT_ID, "text": msg[i:i+4000]}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup and i + 4000 >= len(msg):
             payload["reply_markup"] = reply_markup
         response = requests.post(url, json=payload, timeout=15)
@@ -583,12 +588,8 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         send_telegram_video(captioned_preview,
                             f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
         send_telegram(
-            f"ريلز {clip.get('serial', clip_id)} — بيانات النشر قبل الاعتماد:\n"
-            f"العنوان ({len(reel_meta['title'])}/100): {reel_meta['title']}\n\n"
-            f"الوصف والهاشتاغات:\n{reel_meta['description']}\n\n"
-            f"كلمات يوتيوب ({len(reel_meta['tags_string'])}/500 حرف):\n"
-            f"{reel_meta['tags_string']}\n\n"
-            + preview_fact_lines(source_facts))
+            format_reel_details(clip, reel_meta, source_facts, preview_fact_lines),
+            parse_mode="HTML")
         stored = preview_dir / f'clip-{clip_id}.mp4'
         shutil.copyfile(captioned_preview, stored)
         preview_manifest['files'][str(clip_id)] = hashlib.sha256(stored.read_bytes()).hexdigest()
@@ -620,6 +621,16 @@ if __name__ == "__main__":
                     os.getenv('CLIP_PLAN_REF', '').strip(),
                     os.getenv('CLIP_IDS', '').strip(), VIDEO_URL, TELEGRAM_FILE_ID,
                     load_clip_plan, save_clip_plan, upload_to_youtube, send_telegram)
+                current = load_clip_plan()
+                if (current.get('status') == 'awaiting_selection'
+                        and current.get('clips')):
+                    send_telegram(
+                        f"باقي {len(current['clips'])} ريلز من نفس الفيديو جاهزة للاختيار. "
+                        "اضغط الزر لإكمال المعاينات دون إعادة تحليل المصدر.",
+                        reply_markup={'inline_keyboard': [[{
+                            'text': '🎬 أكمل باقي الريلز',
+                            'callback_data': f"p:menu:{_ui_fingerprint(current)}"
+                        }]]})
             except Exception as exc:
                 send_telegram('❌ تعذر نشر المقطع المعتمد: ' + str(exc)[:500])
                 raise
