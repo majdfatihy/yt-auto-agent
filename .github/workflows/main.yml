@@ -122,6 +122,7 @@ jobs:
           VIDEO_URL: ${{ github.event.client_payload.video_url || github.event.inputs.video_url }}
           AGENT_ACTION: ${{ github.event.client_payload.agent_action || 'prepare' }}
           CLIP_IDS: ${{ github.event.client_payload.clip_ids || '' }}
+          CLIP_OPTIONS_JSON: ${{ github.event.client_payload.clip_options || '{}' }}
           CLIP_PLAN_REF: ${{ github.event.client_payload.clip_plan_ref || '' }}
           REEL_MAX_SECONDS: ${{ github.event.client_payload.max_seconds || '59' }}
 

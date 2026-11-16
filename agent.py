@@ -15,7 +15,8 @@ from reel_metadata import generate_reel_metadata, parse_youtube_tags
 from reel_full_plan import build_remaining_plan
 from reel_video_layout import ffprobe_layout, layout_filter
 from reel_topics import build_topic_plan
-from reel_transcript_store import store_clip_transcripts, load_clip_transcripts
+from reel_transcript_store import (store_clip_transcripts, load_clip_transcripts,
+                                   store_caption_cues, load_caption_cues)
 from direct_publish import publish_direct
 from reel_history import load_history, has_overlap, published_windows
 from source_video_info import original_youtube_id, read_source_facts, preview_fact_lines
@@ -32,6 +33,7 @@ from transcription_pipeline import obtain_timed_transcript, cues_to_text, clip_h
 from captions_renderer import burn_captions
 from caption_revisions import apply_approved_edits
 from transcript_proofreader import proofread_timed_cues, preserve_approved_word_edits
+from reel_preview_settings import resolve_preview_settings
 from clip_planner import (build_clip_plan, format_clip_plan, save_clip_plan, source_duration,
                           load_clip_plan, plan_reference, parse_clip_choices, record_preview_result)
 from google.oauth2.credentials import Credentials
@@ -522,18 +524,21 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
     preview_cues = None  # One local-source transcription for all chosen clips.
     preview_metadata = {}
     source_facts = None
+    effective_settings = resolve_preview_settings(
+        plan, chosen_ids, os.getenv('CLIP_OPTIONS_JSON', ''))
     for clip_id in chosen_ids:
         if plan_reference(load_clip_plan()) != expected_ref:
             raise RuntimeError('CLIP_PLAN_CHANGED: source replaced during preview')
         clip = clips_by_id[clip_id]
-        settings = (plan.get('clip_settings') or {}).get(str(clip_id), {})
+        settings = effective_settings[clip_id]
         download_and_convert_to_reel(VIDEO_URL, clip['start_time'], clip['end_time'],
                                      blur_mode=settings.get('blur', 'auto'))
         if preview_cues is None:
             # Stage 3: trust the audio of the MP4 being cut, never title-only text.
             if plan.get('method') == 'topic_transcript_ai':
-                preview_cues = load_clip_transcripts(plan).get('cues', [])
-                preview_source = 'saved_prepare_transcript'
+                preview_cues = (load_caption_cues(plan) or
+                                load_clip_transcripts(plan).get('cues', []))
+                preview_source = 'saved_caption_cues'
             else:
                 preview_cues, preview_source = obtain_timed_transcript(
                     VIDEO_URL, video_path='input.mp4', cookies_file=COOKIES_FILE,
@@ -541,13 +546,26 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
             if not preview_cues:
                 raise RuntimeError('CAPTIONS_UNAVAILABLE: no timed transcription for the selected source; cannot send an uncaptioned preview')
             print(f'PREVIEW_TRANSCRIPTION: {preview_source}; CUES: {len(preview_cues)}')
-            # Validate manual edits against the original ASR words first.
+            # Match the final upload's saved caption cues to the exact preview.
             original_cues = preview_cues
             approved_cues = apply_approved_edits(original_cues, VIDEO_URL)
-            # Audio-grounded proofread: Gemini -> Deepgram -> AssemblyAI.
-            reviewed_cues = proofread_timed_cues(original_cues)
-            # Manual edits win even if Gemini changed their original words.
-            preview_cues = preserve_approved_word_edits(original_cues, reviewed_cues, approved_cues)
+            if plan.get('caption_cues_prepared'):
+                preview_cues = approved_cues
+                print('CAPTION_PROOFREAD: SAVED_REVIEW_REUSED; NO_RETRANSCRIPTION')
+            else:
+                # Audio-grounded proofread: Gemini -> Deepgram -> AssemblyAI.
+                reviewed_cues = proofread_timed_cues(original_cues)
+                preview_cues = preserve_approved_word_edits(
+                    original_cues, reviewed_cues, approved_cues)
+            if plan.get('method') == 'topic_transcript_ai':
+                latest = load_clip_plan()
+                if plan_reference(latest) != expected_ref:
+                    raise RuntimeError('CAPTION_PLAN_CHANGED_DURING_REVIEW')
+                store_caption_cues(latest, preview_cues)
+                latest['caption_cues_prepared'] = True
+                save_clip_plan(latest)
+                plan = latest
+                print('CAPTION_PREVIEW_UPLOAD_PARITY: SAVED')
             # Read original YouTube dates from the official API only if a
             # YouTube link is the source; Drive never implies an upload date.
             youtube_client = None
@@ -600,7 +618,7 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
         stamp_start = f"{clip['start_time']:.1f}"
         stamp_end = f"{clip['end_time']:.1f}"
         send_telegram_video(captioned_preview,
-                            f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nلم يُنشر الفيديو")
+                            f"معاينة {clip_id}: {reel_meta['title']}\n{stamp_start}s - {stamp_end}s\nخصوصية الرفع: {settings['privacy']}\nلم يُنشر الفيديو")
         send_telegram(
             format_reel_details(clip, reel_meta, source_facts, preview_fact_lines),
             parse_mode="HTML")
@@ -759,6 +777,10 @@ if __name__ == "__main__":
             # Save source-aligned full transcript and word timing once; subsequent
             # preview/approval/scheduled uploads reuse it instead of running ASR.
             store_clip_transcripts(plan, clip_texts, timed_cues)
+            # The direct-publish path uses these same captions unless an owner
+            # first reviews a preview and saves corrected audio-grounded cues.
+            store_caption_cues(plan, timed_cues)
+            plan['caption_cues_prepared'] = False
             failed_seo = []
             for clip in plan['clips']:
                 try:

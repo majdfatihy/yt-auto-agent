@@ -13,7 +13,7 @@ from clip_planner import load_clip_plan, save_clip_plan
 from reel_history import load_history, has_overlap, record_published
 from reel_metadata import parse_youtube_tags
 from reel_title_quality import valid_title
-from reel_transcript_store import load_clip_transcripts
+from reel_transcript_store import load_clip_transcripts, load_caption_cues
 
 
 def utc_now():
@@ -56,7 +56,8 @@ def publish_direct(expected_ref, selected, url, telegram_file_id,
     # Timed speech was saved during transcription-first /prepare.
     # No second full-file ASR pass for each scheduled reel.
     full_text = load_clip_transcripts(plan)
-    cues = full_text.get("cues", [])
+    saved_caption_cues = load_caption_cues(plan)
+    cues = saved_caption_cues if saved_caption_cues is not None else full_text.get("cues", [])
     if not cues:
         raise RuntimeError("DIRECT_PUBLISH_TIMED_CUES_MISSING")
     # Only download video once within this runner, if multiple reels are selected.

@@ -162,6 +162,16 @@ async function updatePreference(env,key,value) {
 function perClipSettings(p,clip,defaults) {
   return {...defaults,...((p.clip_settings||{})[String(clip.id)]||{})};
 }
+// Preview and publish use identical owner-selected rendering settings.
+async function previewOptions(env, plan, ids) {
+  const defaults = await preferences(env);
+  return JSON.stringify(Object.fromEntries(ids.map(id => {
+    const clip = plan.clips.find(c => c.id === id);
+    if (!clip) throw Error('ريلز غير موجود ضمن القائمة.');
+    const {captions, blur, privacy} = perClipSettings(plan, clip, defaults);
+    return [String(id), {captions, blur, privacy}];
+  })));
+}
 function videoTime(sec) {
   const n=Math.round(Number(sec)||0);
   const h=Math.floor(n/3600),m=Math.floor(n%3600/60),s=n%60;
@@ -727,7 +737,8 @@ async function handleCallback(env, cb) {
         const ids=selectedOpen(plan,await selection(env,plan));
         if(!ids.length)throw Error('اختر مقطعًا أو أكثر للمعاينة.');
         await dispatch(env,plan,'preview',{
-          clip_ids:ids.join(','),clip_plan_ref:plan.created_utc
+          clip_ids:ids.join(','),clip_plan_ref:plan.created_utc,
+          clip_options:await previewOptions(env,plan,ids)
         });
         return send(env,'🎞️ بدأ تجهيز '+ids.length+' معاينة، دون نشر.');
       }
@@ -778,7 +789,8 @@ async function handleCallback(env, cb) {
       if (!ids.length) throw Error('لا توجد مقاطع متبقية للمعاينة.');
       parseChoices(ids.join(','), plan);
       await dispatch(env, plan, 'preview',
-        {clip_ids: ids.join(','), clip_plan_ref: plan.created_utc});
+        {clip_ids: ids.join(','), clip_plan_ref: plan.created_utc,
+         clip_options: await previewOptions(env,plan,ids)});
       return send(env, 'بدأ تجهيز معاينة ' + ids.length + ' مقطع دون نشر. ستصلك البيانات مع كل فيديو.');
     }
     if (pieces[1] === 'approvepublish') {
@@ -1202,7 +1214,8 @@ async function processUpdate(env, update) {
         throw Error('الاقتراحات لا تطابق المصدر الحالي. أرسل /prepare.');
       const ids = parseChoices(choiceText, plan);
       await dispatch(env, plan, 'preview',
-        {clip_ids: ids.join(','), clip_plan_ref: plan.created_utc});
+        {clip_ids: ids.join(','), clip_plan_ref: plan.created_utc,
+         clip_options: await previewOptions(env,plan,ids)});
       return send(env, 'تم طلب معاينة المقاطع ' + ids.join(', ') + '. دون نشر.');
     } catch (e) {
       return send(env, String(e.message || e));
