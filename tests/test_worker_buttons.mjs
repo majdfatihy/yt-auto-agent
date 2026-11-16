@@ -94,25 +94,24 @@ plan.status='previewed_awaiting_approval';
 plan.previewed_ids=[3];
 plan.preview_run_id='13579';
 await msg('/menu');
-const approve=button('اعتماد المعاينة');
+const approve=button('موافق: اعتماد ونشر خاص');
 await press(approve.replace(':13579', ':99999'));
 assert.equal(plan.status,'previewed_awaiting_approval','old preview callback must not approve');
 await press(approve,111);
 assert.equal(plan.status,'previewed_awaiting_approval');
+const before=dispatched.length;
 await press(approve);
-assert.equal(plan.status,'approved');
+assert.equal(plan.status,'publish_queued');
 assert.deepEqual(plan.approved_ids,[3]);
 assert.ok(plan.approval_utc);
-await msg('/menu');
-const confirm=button('تأكيد النشر الخاص');
-await press(confirm);
-assert.equal(dispatched.length,previousCount,'first click is only a confirmation');
-await press(button('نعم، انشر خاص'));
-assert.equal(plan.status,'publish_queued');
+assert.equal(dispatched.length,before+1,'one explicit button should approve and dispatch once');
+assert.equal(dispatched.at(-1).client_payload.agent_action,'publish');
 assert.equal(dispatched.at(-1).client_payload.clip_ids,'3');
 const publishedCount=dispatched.length;
-await press(confirm);
+await press(approve);
 assert.equal(dispatched.length,publishedCount,'old button cannot republish');
+await msg('/menu');
+assert.ok(!lastMarkup().some(x=>x.text.includes('موافق: اعتماد ونشر خاص')));
 
 // Auth failed after token refresh before upload, explicit second-confirmation retry.
 plan={...structuredClone(initial),status:'auth_failed',previewed_ids:[3],preview_run_id:'13579',
