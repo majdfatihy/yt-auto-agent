@@ -39,6 +39,23 @@ class TestClipPlanner(unittest.TestCase):
         self.assertEqual(plan['method'], 'gemini')
         self.assertEqual([c['start_time'] for c in plan['clips']], [0.0, 25.0, 50.0])
 
+    def test_recommended_clip_uses_ai_priority_not_earliest_start(self):
+        candidates = [
+            {'title': 'خطوات تحسين قناة يوتيوب وتجربة الميزة الثانية',
+             'start_time': 50, 'end_time': 80},
+            {'title': 'خطوات تحسين قناة يوتيوب وتجربة الميزة الأولى',
+             'start_time': 0, 'end_time': 30},
+            {'title': 'خطوات تحسين قناة يوتيوب وتجربة الميزة الثالثة',
+             'start_time': 25, 'end_time': 55}
+        ]
+        with patch.object(clip_planner, '_gemini_candidates', return_value=candidates):
+            plan = clip_planner.build_clip_plan(
+                'https://youtu.be/abc', '', self.cues, 92.3, 'fake')
+        selected = next(clip for clip in plan['clips']
+                        if clip['id'] == plan['recommended_clip_id'])
+        self.assertEqual(selected['start_time'], 50.0)
+        self.assertEqual(plan['clips'][0]['start_time'], 0.0)
+
     def test_reject_hallucinated_timestamps(self):
         self.assertIsNone(clip_planner._validate({"title": "موضوع", "start_time": 1000, "end_time": 1045},
                                                  self.cues, 92.3))
