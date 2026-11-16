@@ -227,6 +227,9 @@ async function topicControls(env,source,plan) {
   rows.push([{text:'☑️ تحديد المتاح كله',callback_data:'p:selectall:'+h},
              {text:'إلغاء التحديد',callback_data:'p:clear:'+h}]);
   rows.push([{text:'✅ اعتماد عناوين المحدد',callback_data:'p:titles:'+h}]);
+  const withoutSeo=clips.filter(c=>c.seo_ready===false && !clipJob(plan,c.id));
+  if(withoutSeo.length)rows.push([{text:'🔄 إعادة تجهيز SEO للمقاطع الناقصة ('+
+    withoutSeo.length+')',callback_data:'p:fixseo:'+h}]);
   rows.push([{text:'🎞️ معاينة',callback_data:'p:preview:'+h},
              {text:'🚀 اعتماد ونشر المحدد',callback_data:'p:publishdirect:'+h}]);
   rows.push([{text:'📅 الجدولة',callback_data:'p:schedulehelp:'+h},
@@ -660,6 +663,15 @@ async function handleCallback(env, cb) {
       if(action==='selectall'||action==='clear') {
         await setSelection(env,plan,action==='clear'?[]:openClips(plan).map(c=>c.id));
         return showMenu(env,source,plan,'☑️ تم تغيير التحديد',cb.message?.message_id);
+      }
+      if(action==='fixseo') {
+        const ids=openClips(plan).filter(c=>c.seo_ready===false).map(c=>c.id);
+        if(!ids.length)throw Error('كل الريلز لديها بيانات SEO جاهزة.');
+        await dispatch(env,plan,'metadata',{
+          clip_ids:ids.join(','),clip_plan_ref:plan.created_utc
+        });
+        return send(env,'🔄 بدأ استكمال SEO للريلز '+ids.join('، ')+
+          ' من التفريغ المخزن، دون تحميل أو تحليل الفيديو مرة أخرى.');
       }
       if(action==='titles') {
         const selected=selectedOpen(plan,await selection(env,plan));
