@@ -1213,7 +1213,7 @@ async function processUpdate(env, update) {
           'ريلز '+id+': '+cairoTime(items[String(id)])).join('\n');
         return send(env,'📅 معاينة جدول الرفع العلني/الخاص بتوقيت مصر:\n'+summary+
           '\nلن يبدأ أي رفع حتى تعتمد الجدول.',
-          inline([[{text:'✅ اعتماد وتنفيذ الجدولة',
+          inline([[{text:'📅 مراجعة الجدولة',
             callback_data:'p:startschedule:'+await planKey(plan)}],
             [{text:'↩️ القائمة',callback_data:'p:menu:'+await planKey(plan)}]]));
       } catch(e){return send(env,'⚠️ '+String(e.message||e));}
