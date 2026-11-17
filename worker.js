@@ -146,7 +146,7 @@ function retriableAuthFailure(plan) {
 }
 
 const PAGE_SIZE = 5;
-const DEFAULT_OPTS = {captions:true,blur:'auto',privacy:'public',max_seconds:59};
+const DEFAULT_OPTS = {captions:true,blur:'auto',privacy:'private',max_seconds:59};
 function topicPlan(p) {return p?.method === 'topic_transcript_ai';}
 function clipJob(p,id) {return p?.clip_jobs?.[String(id)]||null;}
 function openClips(p) {return (p?.clips||[]).filter(c=>!['pending','queued','uploading','published','needs_review','dispatch_unknown'].includes(clipJob(p,c.id)?.state));}
@@ -241,10 +241,10 @@ async function topicControls(env,source,plan) {
   if(withoutSeo.length)rows.push([{text:'🔄 إعادة تجهيز SEO للمقاطع الناقصة ('+
     withoutSeo.length+')',callback_data:'p:fixseo:'+h}]);
   rows.push([{text:'🎞️ معاينة',callback_data:'p:preview:'+h},
-             {text:'🚀 اعتماد ونشر المحدد',callback_data:'p:publishdirect:'+h}]);
+             {text:'⚙️ مراجعة النشر',callback_data:'p:publishdirect:'+h}]);
   rows.push([{text:'📅 الجدولة',callback_data:'p:schedulehelp:'+h},
              {text:'⚙️ الإعدادات',callback_data:'p:settings:'+h}]);
-  if(plan.schedule_draft)rows.push([{text:'✅ اعتماد وتنفيذ الجدولة',
+  if(plan.schedule_draft)rows.push([{text:'📅 مراجعة الجدولة',
     callback_data:'p:startschedule:'+h}]);
   if(Object.values(plan.clip_jobs||{}).some(j=>j.state==='pending'))
     rows.push([{text:plan.schedule_paused?'▶️ استئناف الجدولة':'⏸️ إيقاف الجدولة',
@@ -353,6 +353,32 @@ async function updateClipSetting(env,plan,id,key) {
 function selectedOpen(plan,chosen) {
   const eligible=new Set(openClips(plan).map(c=>c.id));
   return chosen.filter(id=>eligible.has(id));
+}
+async function reviewPublish(env,plan) {
+  const d=plan.publish_review,h=await planKey(plan);
+  if(!d||!d.ids?.length)throw Error('لا يوجد اختيار للمراجعة.');
+  const rows=[
+    [{text:'🌐 علني',callback_data:'p:reviewprivacy:'+h+':public'},
+     {text:'🔗 غير مدرج',callback_data:'p:reviewprivacy:'+h+':unlisted'},
+     {text:'🔒 خاص',callback_data:'p:reviewprivacy:'+h+':private'}],
+    [{text:'🚀 فوري',callback_data:'p:reviewmode:'+h+':now'},
+     {text:'📅 جدولة',callback_data:'p:reviewmode:'+h+':later'}]];
+  if(d.mode==='later')rows.push(
+    [{text:'بعد ساعة',callback_data:'p:reviewdate:'+h+':60'},
+     {text:'غدًا',callback_data:'p:reviewdate:'+h+':1440'},
+     {text:'بعد أسبوع',callback_data:'p:reviewdate:'+h+':10080'}],
+    [{text:'10 دقائق',callback_data:'p:reviewgap:'+h+':10'},
+     {text:'ساعة',callback_data:'p:reviewgap:'+h+':60'},
+     {text:'يوم',callback_data:'p:reviewgap:'+h+':1440'}]);
+  if(d.privacy&&d.mode&&(d.mode==='now'||d.start||d.items))
+    rows.push([{text:'✅ تأكيد نهائي وتنفيذ',callback_data:'p:reviewconfirm:'+h}]);
+  rows.push([{text:'↩️ إلغاء',callback_data:'p:menu:'+h}]);
+  return send(env,'مراجعة المقاطع: '+d.ids.join('، ')+
+    '\nالخصوصية: '+(d.privacy||'اختر')+
+    '\nالنشر: '+(d.mode||'اختر')+
+    (d.start?'\nالبداية: '+cairoTime(d.start):'')+
+    (d.mode==='later'?'\nالفاصل: '+(d.gap||60)+' دقيقة':'')+
+    '\nلا يبدأ الرفع قبل الضغط على التأكيد النهائي.',inline(rows));
 }
 async function queueTopicJobs(env,source,original,chosen,scheduled=null) {
   if(!topicPlan(original)||!sameSource(source,original))
@@ -705,7 +731,10 @@ async function handleCallback(env, cb) {
       if(action==='publishdirect') {
         const ids=selectedOpen(plan,await selection(env,plan));
         if(!ids.length)throw Error('اختر الريلز المطلوب أولًا. يمكنك تحديد الكل بضغطة واحدة.');
-        return queueTopicJobs(env,source,plan,ids);
+        const latest=await readPlan(env);
+        latest.publish_review={ids,mode:null,privacy:null};
+        await writePlan(env,latest);
+        return reviewPublish(env,latest);
       }
       if(action==='schedulehelp')return send(env,
         '📅 جدول الريلز (بتوقيت القاهرة):\n'+
@@ -721,7 +750,10 @@ async function handleCallback(env, cb) {
         const draft=plan.schedule_draft;
         if(!draft||!Array.isArray(draft.ids)||!draft.ids.length)
           throw Error('لا توجد مواعيد محفوظة. اكتب /schedule أولًا.');
-        return queueTopicJobs(env,source,plan,draft.ids,draft.items);
+        const latest=await readPlan(env);
+        latest.publish_review={ids:draft.ids,mode:'later',privacy:null,items:draft.items};
+        await writePlan(env,latest);
+        return reviewPublish(env,latest);
       }
       if(action==='pause') {
         const latest=await readPlan(env);
@@ -750,7 +782,50 @@ async function handleCallback(env, cb) {
         const ids=selectedOpen(plan,chosen.length?chosen:previewIds(plan));
         if(!ids.length||!ids.every(x=>previewIds(plan).includes(x)))
           throw Error('لا توجد معاينات معتمدة صالحة.');
-        return queueTopicJobs(env,source,plan,ids);
+        const latest=await readPlan(env);
+        latest.publish_review={ids,mode:null,privacy:null};
+        await writePlan(env,latest);
+        return reviewPublish(env,latest);
+      }
+      if(['reviewprivacy','reviewmode','reviewdate','reviewgap','reviewconfirm'].includes(action)) {
+        const latest=await readPlan(env),draft=latest?.publish_review;
+        if(!draft||latest.created_utc!==plan.created_utc)throw Error('المراجعة قديمة.');
+        if(action==='reviewprivacy') {
+          if(!['public','unlisted','private'].includes(pieces[3]))throw Error('خصوصية غير صالحة.');
+          draft.privacy=pieces[3];
+        } else if(action==='reviewmode') {
+          if(!['now','later'].includes(pieces[3]))throw Error('اختيار غير صالح.');
+          draft.mode=pieces[3];
+          if(draft.mode==='now')delete draft.start;
+        } else if(action==='reviewdate') {
+          const v=Number(pieces[3]);
+          if(![60,1440,10080].includes(v))throw Error('موعد غير صالح.');
+          draft.start=new Date(Date.now()+v*60000).toISOString();
+          delete draft.items;
+        } else if(action==='reviewgap') {
+          const v=Number(pieces[3]);
+          if(![10,60,1440].includes(v))throw Error('فاصل غير صالح.');
+          draft.gap=v;delete draft.items;
+        } else {
+          if(!draft.privacy||!draft.mode||(draft.mode==='later'&&!draft.start&&!draft.items))
+            throw Error('اختر الخصوصية والموعد أولًا.');
+          const ids=selectedOpen(latest,draft.ids);
+          if(ids.length!==draft.ids.length)throw Error('حالة الريلز تغيرت.');
+          latest.clip_settings=latest.clip_settings||{};
+          for(const id of ids)latest.clip_settings[String(id)]={
+            ...(latest.clip_settings[String(id)]||{}),privacy:draft.privacy};
+          let scheduled=null;
+          if(draft.mode==='later') {
+            scheduled=draft.items||{};
+            if(!draft.items)for(let i=0;i<ids.length;i++)
+              scheduled[String(ids[i])]=new Date(Date.parse(draft.start)+i*(draft.gap||60)*60000).toISOString();
+          }
+          delete latest.publish_review;
+          await writePlan(env,latest);
+          return queueTopicJobs(env,source,latest,ids,scheduled);
+        }
+        await writePlan(env,latest);
+        return reviewPublish(env,latest);
       }
     }
 
