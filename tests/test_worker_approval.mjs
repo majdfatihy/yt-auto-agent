@@ -27,8 +27,23 @@ await sendMessage('/approve 2'); assert.equal(plan.status,'previewed_awaiting_ap
 artifactsReady=false;
 await sendMessage('/approve 1');assert.equal(plan.status,'previewed_awaiting_approval');
 artifactsReady=true;
-await sendMessage('/approve ١');assert.deepEqual(plan.approved_ids,[1]);assert.equal(plan.status,'publish_queued');
-assert.equal(dispatched.length,1,'approve immediately dispatches private YouTube upload');
+await sendMessage('/approve ١');
+assert.equal(plan.status,'previewed_awaiting_approval');
+assert.equal(dispatched.length,0,'approval must not publish without confirmation');
+assert.deepEqual(plan.legacy_publish_review.ids,[1]);
+async function callback(action,value) {
+ const h=(await import('node:crypto')).createHash('sha256').update(base.created_utc).digest('hex').slice(0,12);
+ const req=new Request('https://worker.example',{method:'POST',headers:{'content-type':'application/json','X-Telegram-Bot-Api-Secret-Token':'secret'},body:JSON.stringify({update_id:n++,callback_query:{id:String(n),from:{id:999},message:{chat:{id:999},message_id:22},data:'p:'+action+':'+h+(value?':'+value:'')}})});
+ const result=await worker.fetch(req,env);assert.equal(result.status,200);
+}
+await callback('legacyprivacy','unlisted');
+assert.equal(plan.legacy_publish_review.privacy,'unlisted');
+assert.equal(dispatched.length,0);
+await callback('legacyconfirm');
+assert.deepEqual(plan.approved_ids,[1]);
+assert.equal(plan.status,'publish_queued');
+assert.equal(dispatched.length,1);
+assert.equal(dispatched[0].client_payload.privacy,'unlisted');
 await sendMessage('/publish');assert.equal(dispatched.length,1);
 assert.equal(dispatched[0].client_payload.agent_action,'publish');
 assert.equal(dispatched[0].client_payload.clip_ids,'1');
