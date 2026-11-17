@@ -574,6 +574,18 @@ async function showMenu(env, source, plan, title = '🎛️ لوحة بوت ال
     (plan && sameSource(source, plan) ? (LABELS[plan.status] || 'الحالة: ' + plan.status) : ''),
     await controls(env, source, plan));
 }
+async function legacyPublishReview(env,plan) {
+  const h=await planKey(plan),d=plan.legacy_publish_review;
+  if(!d?.ids?.length)throw Error('لا توجد معاينات للاعتماد.');
+  const rows=[[{text:'🌐 علني',callback_data:'p:legacyprivacy:'+h+':public'},
+    {text:'🔗 غير مدرج',callback_data:'p:legacyprivacy:'+h+':unlisted'},
+    {text:'🔒 خاص',callback_data:'p:legacyprivacy:'+h+':private'}]];
+  if(d.privacy)rows.push([{text:'✅ تأكيد نهائي ورفع الآن',callback_data:'p:legacyconfirm:'+h}]);
+  rows.push([{text:'↩️ رجوع',callback_data:'p:menu:'+h}]);
+  return send(env,'مراجعة المقاطع: '+d.ids.join('، ')+
+    '\nمستوى العرض: '+(d.privacy||'اختر أولًا')+
+    '\nلن يبدأ النشر قبل التأكيد النهائي.',inline(rows));
+}
 async function publishPlan(env, source, plan) {
   if (!plan || plan.status !== 'approved' || !Array.isArray(plan.approved_ids) ||
       !plan.approved_ids.length || !plan.approval_utc)
@@ -584,7 +596,7 @@ async function publishPlan(env, source, plan) {
   await writePlan(env, plan);
   try {
     await dispatch(env, plan, 'publish', {clip_ids: plan.approved_ids.join(','),
-      clip_plan_ref: plan.created_utc});
+      clip_plan_ref: plan.created_utc,privacy:plan.publish_privacy||'private'});
   } catch (err) {
     plan.status = 'approved';
     await writePlan(env, plan);
@@ -889,9 +901,32 @@ async function handleCallback(env, cb) {
         throw Error('هذه المعاينة اتعمدت أو اتغيرت بالفعل؛ لا تكرر الرفع.');
       latest.approved_ids = ids;
       latest.approval_utc = new Date().toISOString();
-      latest.status = 'approved';
-      await writePlan(env, latest);
-      return publishPlan(env, source, latest);
+      latest.legacy_publish_review={ids,privacy:null};
+      latest.approved_ids=[];
+      latest.approval_utc=null;
+      await writePlan(env,latest);
+      return legacyPublishReview(env,latest);
+    }
+    if (pieces[1] === 'legacyprivacy') {
+      if(!['public','unlisted','private'].includes(pieces[3]))throw Error('خصوصية غير صالحة.');
+      const latest=await readPlan(env);
+      if(!latest.legacy_publish_review)throw Error('مراجعة قديمة.');
+      latest.legacy_publish_review.privacy=pieces[3];
+      await writePlan(env,latest);
+      return legacyPublishReview(env,latest);
+    }
+    if (pieces[1] === 'legacyconfirm') {
+      const latest=await readPlan(env),review=latest.legacy_publish_review;
+      if(!review?.privacy||latest.status!=='previewed_awaiting_approval')
+        throw Error('اختر الخصوصية أولًا.');
+      await requirePreviewArtifact(env,latest);
+      latest.approved_ids=review.ids;
+      latest.approval_utc=new Date().toISOString();
+      latest.publish_privacy=review.privacy;
+      latest.status='approved';
+      delete latest.legacy_publish_review;
+      await writePlan(env,latest);
+      return publishPlan(env,source,latest);
     }
     if (pieces[1] === 'approve') {
       if (plan.status !== 'previewed_awaiting_approval' || !previewIds(plan).length)
