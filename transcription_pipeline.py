@@ -104,7 +104,7 @@ def groq_transcribe(path, word_timestamps=False):
     response.raise_for_status()
     payload = response.json()
     observations = payload.get('words', []) if word_timestamps else payload.get('segments', [])
-    return _from_words(observations or payload.get('segments', []))
+    return _from_words(observations)  # Never substitute segments for requested word timestamps
 
 
 def deepgram_transcribe(path):

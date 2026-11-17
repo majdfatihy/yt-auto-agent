@@ -125,8 +125,11 @@ def _fallback_cues_valid(original, candidate):
     """Avoid switching to empty, segment-level or clearly truncated fallback output."""
     if not _word_cues_valid(candidate):
         return False
-    if not (max(3, int(len(original) * .55)) <= len(candidate) <= int(len(original) * 1.6) + 1):
-        return False
+    # Segment-level source cues and word-level ASR are different units.
+    # Compare token counts only when the original is already word-timed.
+    if _word_cues_valid(original):
+        if not (max(3, int(len(original) * .55)) <= len(candidate) <= int(len(original) * 1.6) + 1):
+            return False
     try:
         start_delta = abs(float(candidate[0]['start']) - float(original[0]['start']))
         end_delta = abs(float(candidate[-1]['end']) - float(original[-1]['end']))

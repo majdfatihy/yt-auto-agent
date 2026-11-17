@@ -155,7 +155,7 @@ jobs:
         run: python agent.py
 
       - name: Store exact preview files for subsequent approval
-        if: ${{ github.event.client_payload.agent_action == 'preview' || (github.event.client_payload.agent_action || 'prepare') == 'prepare' }}
+        if: ${{ github.event.client_payload.agent_action == 'preview' }}
         uses: actions/upload-artifact@v4
         with:
           name: preview-${{ github.run_id }}
