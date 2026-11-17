@@ -1163,7 +1163,10 @@ async function processUpdate(env, update) {
       const raw=text.slice(text.split(/\s+/)[0].length).trim();
       const ids=raw==='all'?openClips(p).map(c=>c.id):
         raw?parseChoices(raw,p):selectedOpen(p,await selection(env,p));
-      return await queueTopicJobs(env,source,p,ids);
+      const latest=await readPlan(env);
+      latest.publish_review={ids,privacy:null,mode:null};
+      await writePlan(env,latest);
+      return reviewPublish(env,latest);
     } catch(e) {
       return send(env,'⚠️ '+String(e.message||e));
     }
@@ -1290,11 +1293,9 @@ async function processUpdate(env, update) {
       if (!ids.every(id => (plan.previewed_ids || []).includes(id)))
         throw Error('يمكن اعتماد مقاطع تمت معاينتها فقط.');
       await requirePreviewArtifact(env, plan);
-      plan.approved_ids = ids;
-      plan.approval_utc = new Date().toISOString();
-      plan.status = 'approved';
-      await writePlan(env, plan);
-      return publishPlan(env, source, plan);
+      plan.legacy_publish_review={ids,privacy:null};
+      await writePlan(env,plan);
+      return legacyPublishReview(env,plan);
     } catch (e) { return send(env, String(e.message || e)); }
   }
   if (cmd === '/publish') {
@@ -1303,9 +1304,12 @@ async function processUpdate(env, update) {
       if(topicPlan(plan)) {
         const ids=selectedOpen(plan,await selection(env,plan));
         if(!ids.length)throw Error('اختر الريلز المطلوب من القائمة أو /publishnow all.');
-        return queueTopicJobs(env,source,plan,ids);
+        const latest=await readPlan(env);
+        latest.publish_review={ids,privacy:null,mode:null};
+        await writePlan(env,latest);
+        return reviewPublish(env,latest);
       }
-      return await publishPlan(env, source, plan);
+      return send(env,'اختر النشر من أزرار المراجعة بعد معاينة الفيديو.');
     }
     catch (e) { return send(env, String(e.message || e)); }
   }
