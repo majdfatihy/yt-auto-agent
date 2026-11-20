@@ -67,7 +67,7 @@ def youtube_id(url):
 
 def list_database():
     """Read the user-managed video catalog. Never process entries implicitly."""
-    rows = _values(DATABASE, "A1:I3000")
+    rows = _values(DATABASE, "A1:Y3000")
     if not rows:
         return []
     keys = rows[0]
@@ -127,3 +127,26 @@ def healthcheck():
     if missing:
         raise RuntimeError("GOOGLE_SHEETS_MISSING_TABS: " + ",".join(sorted(missing)))
     return {"connected": True, "tabs": sorted(names)}
+
+def list_content_queue():
+    """Read all user-authored scheduling rows without posting or mutating them."""
+    from content_queue import COLUMNS
+    rows = _values("Content_Queue", "A1:Q1000")
+    if not rows:
+        return []
+    if tuple(rows[0][:len(COLUMNS)]) != COLUMNS:
+        raise RuntimeError("CONTENT_QUEUE_HEADER_MISMATCH")
+    return [dict(zip(COLUMNS, row)) for row in rows[1:] if row and any(str(v).strip() for v in row)]
+
+
+def plan_content_queue(now=None):
+    """Produce per-platform dry-run decisions; approval and unknown-outcome guards apply."""
+    from content_queue import plan
+    results = []
+    for index, row in enumerate(list_content_queue(), start=2):
+        try:
+            results.append({"sheet_row": index, **plan(row, now)})
+        except (ValueError, KeyError) as exc:
+            results.append({"sheet_row": index, "task_id": row.get("task_id",""),
+                            "state": "invalid", "reason": str(exc), "targets": []})
+    return results
