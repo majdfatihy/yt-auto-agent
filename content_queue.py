@@ -78,6 +78,8 @@ def normalize(row):
     rule = item["repeat_rule"].lower() or "none"
     if rule not in {"none","daily","weekly","monthly"}:
         raise ValueError("REPEAT_RULE_INVALID")
+    if rule != "none" and not item["scheduled_at"]:
+        raise ValueError("REPEAT_REQUIRES_SCHEDULE")
     if item["scheduled_at"]:
         parse_time(item["scheduled_at"],item["timezone"] or "Africa/Cairo")
     item["destinations"] = targets
