@@ -93,9 +93,9 @@ def plan(row, now=None):
         return {"task_id":item["task_id"],"state":"awaiting_approval","targets":[]}
     if item["status"].lower() in TERMINAL:
         return {"task_id":item["task_id"],"state":"already_final","targets":[]}
-    if item["status"].lower() in {"processing","partial","needs_review"}:
+    if item["status"].lower() in {"processing","partial","needs_review","failed"}:
         return {"task_id":item["task_id"],"state":"manual_review","targets":[]}
-    now = now or datetime.now(timezone.utc)
+    if item["status"].lower() in {"draft","pending_approval"}:\n        return {"task_id":item["task_id"],"state":"awaiting_approval","targets":[]}\n    now = now or datetime.now(timezone.utc)
     if item["scheduled_at"] and parse_time(item["scheduled_at"],item["timezone"] or "Africa/Cairo") > now:
         return {"task_id":item["task_id"],"state":"scheduled","targets":[]}
     targets=[]
