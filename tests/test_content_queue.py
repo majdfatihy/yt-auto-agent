@@ -30,6 +30,13 @@ class QueueTests(unittest.TestCase):
     def test_text_length_review(self):
         row={**BASE,"text":"a"*501}
         self.assertEqual(next(t for t in plan(row)["targets"] if t["platform"]=="threads")["state"],"needs_text_edit")
+    def test_failed_requires_manual_review(self):
+        self.assertEqual(plan({**BASE,"status":"failed"})["state"],"manual_review")
+    def test_draft_cannot_run_with_approval_flag(self):
+        self.assertEqual(plan({**BASE,"status":"draft"})["state"],"awaiting_approval")
+    def test_repeat_requires_time(self):
+        with self.assertRaises(ValueError):
+            normalize({**BASE,"repeat_rule":"daily","scheduled_at":""})
     def test_month_end(self):
         self.assertTrue(next_occurrence("2026-01-31T10:00:00+02:00","monthly").startswith("2026-02-28T10:00:00"))
 
