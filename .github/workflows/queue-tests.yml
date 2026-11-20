@@ -1,0 +1,26 @@
+name: Reels queue unit tests
+on:
+  push:
+    branches:
+      - feature/google-sheets-reels-integration-20261120
+  pull_request:
+    paths:
+      - 'content_queue.py'
+      - 'google_sheets_bridge.py'
+      - 'tests/test_content_queue.py'
+      - '.github/workflows/queue-tests.yml'
+  workflow_dispatch:
+jobs:
+  queue-unit-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile queue module
+        run: python -m py_compile content_queue.py
+      - name: Run queue unit tests (no platform credentials)
+        run: python -m unittest discover -s tests -p 'test_content_queue.py' -v
