@@ -556,12 +556,16 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
                 recovered, recovered_provider = obtain_timed_transcript(
                     VIDEO_URL, video_path=source_path, cookies_file=COOKIES_FILE,
                     prefer_local_audio=True, prefer_word_timestamps=True)
-                if not _word_cues_valid(recovered):
-                    raise RuntimeError('CAPTION_WORD_TIMINGS_UNRECOVERABLE: no genuine word-level timestamps; preview not rendered')
-                preview_cues = recovered
-                print(f'PREVIEW_CAPTIONS: WORD_TIMINGS_RECOVERED; PROVIDER: {recovered_provider}')
-                # A previously cached review based on segment timings is invalid.
-                plan['caption_cues_prepared'] = False
+                if _word_cues_valid(recovered):
+                    preview_cues = recovered
+                    print(f'PREVIEW_CAPTIONS: WORD_TIMINGS_RECOVERED; PROVIDER: {recovered_provider}')
+                    # A previously cached review based on segment timings is invalid.
+                    plan['caption_cues_prepared'] = False
+                else:
+                    # Keep real segment timings rather than inventing per-word
+                    # highlights. Static segment captions remain available.
+                    print('PREVIEW_CAPTIONS: WORD_TIMINGS_UNAVAILABLE; USING_STATIC_SEGMENT_CAPTIONS')
+                    plan['caption_cues_prepared'] = False
             # Match the final upload's saved caption cues to the exact preview.
             original_cues = preview_cues
             approved_cues = apply_approved_edits(original_cues, VIDEO_URL)
@@ -570,9 +574,15 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
                 print('CAPTION_PROOFREAD: SAVED_REVIEW_REUSED; NO_RETRANSCRIPTION')
             else:
                 # Audio-grounded proofread: Gemini -> Deepgram -> AssemblyAI.
-                reviewed_cues = proofread_timed_cues(original_cues)
-                preview_cues = preserve_approved_word_edits(
-                    original_cues, reviewed_cues, approved_cues)
+                if _word_cues_valid(original_cues):
+                    reviewed_cues = proofread_timed_cues(original_cues)
+                    preview_cues = preserve_approved_word_edits(
+                        original_cues, reviewed_cues, approved_cues)
+                else:
+                    # The audio transcription already contains real segment
+                    # boundaries; keep them without misleading word highlights.
+                    preview_cues = approved_cues
+                    print('CAPTION_PROOFREAD: SEGMENT_MODE; MANUAL_EDITS_PRESERVED; WORD_HIGHLIGHTS_DISABLED')
             if plan.get('method') == 'topic_transcript_ai':
                 latest = load_clip_plan()
                 if plan_reference(latest) != expected_ref:
@@ -600,7 +610,8 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
                 VIDEO_URL, cues_to_text(preview_cues), youtube_client)
         captioned_preview = (
             burn_captions('output_reel.mp4', preview_cues,
-                          clip['start_time'], clip['end_time'])
+                          clip['start_time'], clip['end_time'],
+                          strict_word_timing=_word_cues_valid(preview_cues))
             if settings.get('captions', True) else 'output_reel.mp4')
         # Fail closed on broken dimensions, before offering or approving a preview.
         dimensions = subprocess.run(
