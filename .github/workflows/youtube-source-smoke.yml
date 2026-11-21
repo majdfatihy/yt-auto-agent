@@ -1,12 +1,6 @@
 name: YouTube Source Authentication Smoke Test
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - youtube_source.py
-      - agent.py
-      - .github/workflows/youtube-source-smoke.yml
   workflow_dispatch:
 
 permissions:
