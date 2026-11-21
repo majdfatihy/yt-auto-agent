@@ -47,17 +47,9 @@ def _split_segment(cue):
         current.append(word)
     if current:
         chunks.append(' '.join(current))
-    if len(chunks) == 1:
-        return [cue], False
-    duration = cue['end']-cue['start']
-    weights = [max(1, len(chunk)) for chunk in chunks]
-    total = sum(weights)
-    cursor, pieces = cue['start'], []
-    for i, (text, weight) in enumerate(zip(chunks, weights)):
-        right = cue['end'] if i == len(chunks)-1 else cursor + duration * weight / total
-        pieces.append({'start': cursor, 'end': right, 'text': text, 'words': []})
-        cursor = right
-    return pieces, True
+    # A segment has one trustworthy start/end interval. Never distribute its
+    # duration among guessed word or card boundaries. Wrap the text instead.
+    return [cue], False
 
 
 def build_caption_events(cues, start, end):
@@ -264,6 +256,8 @@ def burn_captions(input_video, cues, start, end, output_video='output_reel_capti
     if not 0 < duration <= end-start+.8:
         raise RuntimeError('CAPTION_OUTPUT_DURATION_INVALID')
     highlights = sum(bool(c['words']) for c in events)
-    print(f'CAPTIONS_BURNED: YES; FONT: {family} Black; HIGHLIGHT_CARDS: {highlights}; '
+    print(f'CAPTIONS_BURNED: YES; FONT: {family} Black; '
+          f'MODE: {"WORD_HIGHLIGHT" if strict_word_timing else "STATIC_SEGMENTS"}; '
+          f'HIGHLIGHT_CARDS: {highlights if strict_word_timing else 0}; '
           f'ESTIMATED_WORD_TIMING: NO; DURATION: {duration:.2f}s')
     return str(output_video)
