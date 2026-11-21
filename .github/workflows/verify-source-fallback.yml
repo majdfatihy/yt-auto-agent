@@ -1,0 +1,33 @@
+name: Verify Telegram MP4 Source Fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - tests/test_worker_mp4_fallback.mjs
+      - .github/workflows/verify-source-fallback.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify_fallback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check Worker and Python syntax
+        run: |
+          node --check worker.js
+          python -m py_compile agent.py youtube_source.py transcription_pipeline.py
+      - name: Test fallback and existing link fast path
+        run: |
+          node tests/test_worker_mp4_fallback.mjs
+          node tests/test_worker_fastpath.mjs
