@@ -778,7 +778,7 @@ if __name__ == "__main__":
         local_source = os.getenv("SOURCE_VIDEO_FILE", "").strip()
         timed_cues, timed_source = obtain_timed_transcript(
             VIDEO_URL, video_path=local_source or None, cookies_file=COOKIES_FILE,
-            prefer_local_audio=is_drive_url(VIDEO_URL))
+            prefer_local_audio=bool(local_source) or is_drive_url(VIDEO_URL))
         timing_grounded = bool(timed_cues)
         if timing_grounded:
             save_captions(timed_cues)
@@ -882,9 +882,10 @@ if __name__ == "__main__":
             send_telegram(
                 '⛔ يوتيوب رفض السماح للخادم بالوصول للفيديو، بعد محاولات التنزيل المتاحة. '
                 'هذا ليس خطأ في أوامر تيليجرام.\n'
-                'لإكمال المهمة دون الاعتماد على تنزيل يوتيوب: أرسل رابط فيديو قابل للتنزيل من Google Drive، '
-                'أو أرسل ملف MP4 لا يتجاوز 20 ميجابايت مع رابط الفيديو الأصلي. '
-                'قد يلزم تحديث Cookies أو تغيير مسار اتصال يوتيوب في GitHub.'
+                'البديل المباشر: ارفع ملف MP4 لا يتجاوز 20 ميجابايت في نفس المحادثة؛ '
+                'البوت هيربطه بآخر رابط محفوظ ويكمل التجهيز تلقائيًا بدون /prepare أو إعادة الرابط. '
+                'لو الفيديو أكبر من 20 ميجابايت، ابعت رابط ملف Google Drive قابل للتنزيل. '
+                'لا يوجد نشر قبل موافقتك.'
             )
         else:
             send_telegram(f"❌ تعذر إكمال المهمة ({type(e).__name__}): {str(e)[:300]}. راجع سجل GitHub Actions للتفاصيل.")
