@@ -118,7 +118,9 @@ def groq_transcribe(path, word_timestamps=False):
         invalid = sum(
             not (math.isfinite(c['start']) and math.isfinite(c['end']) and
                  c['end'] > c['start'] >= 0 and len(c['text']) <= 100 and
-                 not re.search(r'\\s|[{}\\\\\\x00-\\x1f\\u202a-\\u202e\\u2066-\\u2069]', c['text']))
+                 not any(ch.isspace() or ch in '{}\\\\' or ord(ch) < 32 or
+                         0x202a <= ord(ch) <= 0x202e or
+                         0x2066 <= ord(ch) <= 0x2069 for ch in c['text']))
             for c in cues
         )
         if invalid:
