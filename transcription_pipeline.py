@@ -104,6 +104,11 @@ def groq_transcribe(path, word_timestamps=False):
     response.raise_for_status()
     payload = response.json()
     observations = payload.get('words', []) if word_timestamps else payload.get('segments', [])
+    # Word-timed captions must never silently fall back to segment timestamps.
+    # A segment can contain many words and cannot drive karaoke-style subtitles.
+    if word_timestamps and not observations:
+        print('TRANSCRIPTION: GROQ_WORD_TIMINGS_UNAVAILABLE; TRY_NEXT_PROVIDER')
+        return []
     return _from_words(observations or payload.get('segments', []))
 
 
