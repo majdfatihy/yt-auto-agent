@@ -1370,7 +1370,27 @@ async function processUpdate(env, update) {
     await dispatch(env, nextSource, 'prepare');
     return send(env, 'وصل الرابط. هيتم اختيار أفضل مقطع وتجهيز الفيديو وSEO تلقائيًا. مفيش نشر قبل موافقتك.');
   }
-  if (media) return send(env, 'وصل MP4 بدون رابط. أضف رابط يوتيوب في تعليق الملف أو رد عليه بالرابط.');
+  if (media) {
+    if ((media.file_size || 0) > MAX_MP4)
+      return send(env, 'ملف MP4 أكبر من 20MB. استخدم رابط ملف Google Drive قابل للتنزيل بدلًا منه.');
+    if (!media.file_id)
+      return send(env, 'ملف MP4 لم يصل بمعرّف صالح. أعد إرسال الملف.');
+    if (!source.video_url)
+      return send(env, 'أرسل رابط يوتيوب أولًا، وبعده ملف MP4 مباشرة. مش محتاج تعيد الرابط.');
+    const existing = await readPlan(env);
+    if (['publish_queued', 'publishing'].includes(existing?.status) || activeJobs(existing))
+      return send(env, 'هناك نشر قيد التنفيذ؛ لا يمكن تغيير المصدر الآن.');
+    const nextSource = {video_url: source.video_url, telegram_file_id: media.file_id,
+      auto_prepare_requested_at: Date.now()};
+    if (sameSource(nextSource, source) && existing?.clips?.length)
+      return showMenu(env, source, existing, '🎬 الملف ده محلل بالفعل؛ القائمة جاهزة.');
+    await clearPlan(env);
+    await env.BOT_STATE.put(key, JSON.stringify(nextSource));
+    await dispatch(env, nextSource, 'prepare');
+    return send(env, '✅ وصل ملف MP4 وربطته تلقائيًا بآخر رابط محفوظ. '
+      + 'بدأ تجهيز الريلز وSEO من الملف مباشرة، بدون تنزيل من يوتيوب. '
+      + 'مش محتاج /prepare، ومفيش نشر قبل موافقتك.');
+  }
   if (text) return showMenu(env, source, await readPlan(env), 'الأمر غير معروف؛ استخدم الأزرار.');
 }
 export default {
