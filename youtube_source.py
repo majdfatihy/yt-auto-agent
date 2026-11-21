@@ -181,19 +181,41 @@ _FALLBACK_ERRORS = {
 }
 
 
-def _download_profiles(cookies_file):
-    """Try independent public YouTube player clients after the default.
+def _cookie_diagnostic(cookies_file):
+    """Inspect only Netscape cookie field names, never secret values."""
+    if not cookies_file:
+        return 'NOT_CONFIGURED'
+    try:
+        names = set()
+        for line in Path(cookies_file).read_text(
+                encoding='utf-8-sig', errors='replace').splitlines():
+            if line.startswith('#HttpOnly_'):
+                line = line[len('#HttpOnly_'):]
+            if line.startswith('#') or not line.strip():
+                continue
+            fields = line.split('\t')
+            if len(fields) != 7:
+                continue
+            host = fields[0].lstrip('.').lower()
+            if host == 'youtube.com' or host.endswith('.youtube.com') or host == 'google.com' or host.endswith('.google.com'):
+                names.add(fields[5])
+        if not names:
+            return 'NO_NETSCAPE_YOUTUBE_ROWS'
+        login_names = {'SAPISID', 'SID', 'HSID', '__Secure-3PSID', '__Secure-1PSID', '__Secure-3PAPISID'}
+        return 'ACCOUNT_COOKIE_FIELDS_PRESENT' if names & login_names else 'NO_ACCOUNT_COOKIE_FIELDS'
+    except OSError:
+        return 'FILE_UNREADABLE'
 
-    Alternate clients receive no account cookies. A network-level/IP block
-    cannot be solved by merely changing the player client.
-    """
-    return (
-        (None, 'mweb'),
-        (cookies_file, None),
-        (None, 'android_vr'),
-        (None, 'web_embedded'),
-        (None, 'web_safari'),
-    )
+
+def _download_profiles(cookies_file):
+    """Try public, then authenticated clients. IP blocks can defeat both."""
+    profiles = [(None, 'mweb')]
+    if cookies_file:
+        profiles.extend(((cookies_file, 'mweb'), (cookies_file, None)))
+    profiles.extend(((None, 'android_vr'), (None, 'web_embedded'), (None, 'web_safari')))
+    if cookies_file:
+        profiles.append((cookies_file, 'web_safari'))
+    return tuple(profiles)
 
 
 def download_youtube_audio(
@@ -216,6 +238,7 @@ def download_youtube_audio(
     last_error = None
 
     profiles = _download_profiles(cookies_file)
+    print(f'YOUTUBE_COOKIES_DIAGNOSTIC: {_cookie_diagnostic(cookies_file)}')
     print(f'YOUTUBE_AUDIO_ACCESS: PROFILES={len(profiles)}; '
           f'COOKIES_CONFIGURED={bool(cookies_file)}; '
           'SOURCE=YOUTUBE; ROUTE=YTDLP_CONFIG')
@@ -287,6 +310,7 @@ def download_youtube_video(
     last_error = None
 
     profiles = _download_profiles(cookies_file)
+    print(f'YOUTUBE_COOKIES_DIAGNOSTIC: {_cookie_diagnostic(cookies_file)}')
     for profile_index, (cookies, clients) in enumerate(profiles):
         print(f'YOUTUBE_VIDEO_PROFILE: INDEX={profile_index + 1}/{len(profiles)}; CLIENT={clients or "default"}; COOKIES={"yes" if cookies else "no"}')
         for format_index, fmt in enumerate(formats):
