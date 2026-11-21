@@ -878,5 +878,14 @@ if __name__ == "__main__":
 
     except Exception as e:
         traceback.print_exc()
-        send_telegram(f"❌ تعذر إكمال المهمة ({type(e).__name__}): {str(e)[:300]}. راجع سجل GitHub Actions للتفاصيل.")
+        if type(e).__name__ == 'YouTubeSourceError' and str(e) == 'YOUTUBE_AUTH_REQUIRED':
+            send_telegram(
+                '⛔ يوتيوب رفض السماح للخادم بالوصول للفيديو، بعد محاولات التنزيل المتاحة. '
+                'هذا ليس خطأ في أوامر تيليجرام.\n'
+                'لإكمال المهمة دون الاعتماد على تنزيل يوتيوب: أرسل رابط فيديو قابل للتنزيل من Google Drive، '
+                'أو أرسل ملف MP4 لا يتجاوز 20 ميجابايت مع رابط الفيديو الأصلي. '
+                'قد يلزم تحديث Cookies أو تغيير مسار اتصال يوتيوب في GitHub.'
+            )
+        else:
+            send_telegram(f"❌ تعذر إكمال المهمة ({type(e).__name__}): {str(e)[:300]}. راجع سجل GitHub Actions للتفاصيل.")
         exit(1)
