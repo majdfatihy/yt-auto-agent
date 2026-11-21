@@ -80,20 +80,45 @@ jobs:
               Path('cookies.txt').chmod(0o600)
           print('YOUTUBE_COOKIES_CONFIGURED: ' + ('YES' if cookies else 'NO'))
           PY
-      - name: Try previously failed YouTube source with exact current code
+      - name: Diagnose rejected video against previously working control
         run: |
           python - <<'PY'
+          import subprocess
           from pathlib import Path
-          from youtube_source import download_youtube_audio, YouTubeSourceError
-
+          from youtube_source import (
+              download_youtube_audio, YouTubeSourceError, _base_command, _classify_error
+          )
           cookies = 'cookies.txt' if Path('cookies.txt').is_file() else None
+          failed = False
           try:
               audio = download_youtube_audio(
-                  'https://youtu.be/DggHblFwsC4',
-                  cookies_file=cookies,
-              )
+                  'https://youtu.be/DggHblFwsC4', cookies_file=cookies)
               print('YOUTUBE_AUTH_SMOKE_TEST: PASS; AUDIO_BYTES=' + str(audio.stat().st_size))
           except YouTubeSourceError as exc:
+              failed = True
               print('YOUTUBE_AUTH_SMOKE_TEST: FAIL; CODE=' + str(exc))
+
+          control_cmd = _base_command(player_clients='mweb') + [
+              '--simulate', '--format', 'ba/b', 'https://youtu.be/6DKICQ8BL-8']
+          try:
+              result = subprocess.run(control_cmd, capture_output=True, text=True, timeout=75)
+              code = 'PASS' if result.returncode == 0 else _classify_error(
+                  (result.stderr or '') + '\n' + (result.stdout or ''))
+              print('CONTROL_PREVIOUSLY_WORKING_VIDEO: ' + code)
+          except subprocess.TimeoutExpired:
+              print('CONTROL_PREVIOUSLY_WORKING_VIDEO: TIMEOUT')
+
+          if cookies and failed:
+              cookie_cmd = _base_command(cookies, player_clients='mweb') + [
+                  '--verbose', '--simulate', 'https://youtu.be/DggHblFwsC4']
+              try:
+                  result = subprocess.run(cookie_cmd, capture_output=True, text=True, timeout=60)
+                  output = (result.stderr or '') + '\n' + (result.stdout or '')
+                  recognized = 'Found YouTube account cookies' in output
+                  print('YOUTUBE_ACCOUNT_COOKIES_RECOGNIZED_BY_YTDLP: ' +
+                        ('YES' if recognized else 'NO_OR_UNKNOWN'))
+              except subprocess.TimeoutExpired:
+                  print('YOUTUBE_ACCOUNT_COOKIES_RECOGNIZED_BY_YTDLP: CHECK_TIMEOUT')
+          if failed:
               raise SystemExit(1)
           PY
