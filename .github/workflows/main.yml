@@ -114,6 +114,31 @@ jobs:
               print('YTDLP_PROXY_CONFIGURED: NO')
           PY
 
+      - name: Verify proxy reachability without logging credentials
+        if: ${{ !contains(github.event.client_payload.video_url || github.event.inputs.video_url, 'drive.google.com') }}
+        env:
+          YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+          proxy = os.environ.get('YTDLP_PROXY', '').strip()
+          if not proxy:
+              print('YTDLP_PROXY_CONNECTIVITY: NOT_CONFIGURED')
+          else:
+              try:
+                  response = requests.get(
+                      'https://www.youtube.com/robots.txt',
+                      proxies={'http': proxy, 'https': proxy},
+                      timeout=(8, 12),
+                  )
+                  state = ('REACHABLE' if response.status_code == 200
+                           else 'HTTP_' + str(response.status_code))
+                  print('YTDLP_PROXY_CONNECTIVITY: ' + state)
+              except requests.RequestException as exc:
+                  print('YTDLP_PROXY_CONNECTIVITY: ERROR_' + type(exc).__name__)
+          PY
+
       - name: تثبيت خط Mikhak Black للمعاينة فقط
         if: ${{ github.event.client_payload.agent_action == 'preview' || github.event.client_payload.agent_action == 'direct_publish' || (github.event.client_payload.agent_action || 'prepare') == 'prepare' }}
         run: python scripts/install_mikhak.py
