@@ -546,6 +546,22 @@ def prepare_selected_previews(plan, chosen_ids, expected_ref):
             if not preview_cues:
                 raise RuntimeError('CAPTIONS_UNAVAILABLE: no timed transcription for the selected source; cannot send an uncaptioned preview')
             print(f'PREVIEW_TRANSCRIPTION: {preview_source}; CUES: {len(preview_cues)}')
+            # Saved /prepare transcripts may contain segment timestamps. Recover
+            # genuine word timings from the original local video before review.
+            from transcript_proofreader import _word_cues_valid
+            if not _word_cues_valid(preview_cues):
+                print('PREVIEW_CAPTIONS: SEGMENT_TIMINGS_DETECTED; RECOVERING_WORD_TIMINGS')
+                local_source = os.getenv('SOURCE_VIDEO_FILE', '').strip()
+                source_path = local_source if local_source and Path(local_source).is_file() else 'input.mp4'
+                recovered, recovered_provider = obtain_timed_transcript(
+                    VIDEO_URL, video_path=source_path, cookies_file=COOKIES_FILE,
+                    prefer_local_audio=True, prefer_word_timestamps=True)
+                if not _word_cues_valid(recovered):
+                    raise RuntimeError('CAPTION_WORD_TIMINGS_UNRECOVERABLE: no genuine word-level timestamps; preview not rendered')
+                preview_cues = recovered
+                print(f'PREVIEW_CAPTIONS: WORD_TIMINGS_RECOVERED; PROVIDER: {recovered_provider}')
+                # A previously cached review based on segment timings is invalid.
+                plan['caption_cues_prepared'] = False
             # Match the final upload's saved caption cues to the exact preview.
             original_cues = preview_cues
             approved_cues = apply_approved_edits(original_cues, VIDEO_URL)
