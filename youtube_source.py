@@ -216,7 +216,12 @@ def download_youtube_audio(
     last_error = None
 
     profiles = _download_profiles(cookies_file)
+    print(f'YOUTUBE_AUDIO_ACCESS: PROFILES={len(profiles)}; '
+          f'COOKIES_CONFIGURED={bool(cookies_file)}; '
+          'SOURCE=YOUTUBE; ROUTE=YTDLP_CONFIG')
     for index, (cookies, clients) in enumerate(profiles):
+        print(f'YOUTUBE_AUDIO_PROFILE: INDEX={index + 1}/{len(profiles)}; '
+              f'CLIENT={clients or "default"}; COOKIES={"yes" if cookies else "no"}')
         cmd = _base_command(
             cookies,
             player_clients=clients,
