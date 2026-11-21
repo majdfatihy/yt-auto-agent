@@ -87,7 +87,8 @@ def _from_words(words):
                 cues.append({'start': start, 'end': end, 'text': text})
         except (KeyError, ValueError, TypeError):
             pass
-    return cues
+    # Preserve genuine timestamps while fixing out-of-order provider arrays.
+    return sorted(cues, key=lambda cue: (cue['start'], cue['end']))
 
 
 def groq_transcribe(path, word_timestamps=False):
@@ -109,7 +110,22 @@ def groq_transcribe(path, word_timestamps=False):
     if word_timestamps and not observations:
         print('TRANSCRIPTION: GROQ_WORD_TIMINGS_UNAVAILABLE; TRY_NEXT_PROVIDER')
         return []
-    return _from_words(observations or payload.get('segments', []))
+    cues = _from_words(observations or payload.get('segments', []))
+    if word_timestamps:
+        # A provider's 'words' array is not proof that every entry is a word.
+        # Reject phrase-sized entries rather than assigning invented timings.
+        import math
+        invalid = sum(
+            not (math.isfinite(c['start']) and math.isfinite(c['end']) and
+                 c['end'] > c['start'] >= 0 and len(c['text']) <= 100 and
+                 not re.search(r'\\s|[{}\\\\\\x00-\\x1f\\u202a-\\u202e\\u2066-\\u2069]', c['text']))
+            for c in cues
+        )
+        if invalid:
+            print(f'TRANSCRIPTION: GROQ_WORD_CUES_INVALID; COUNT: {invalid}; '
+                  f'TOTAL: {len(cues)}; TRY_NEXT_PROVIDER')
+            return []
+    return cues
 
 
 def deepgram_transcribe(path):
