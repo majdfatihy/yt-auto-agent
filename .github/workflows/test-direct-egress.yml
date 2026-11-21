@@ -1,0 +1,58 @@
+name: Diagnose Direct YouTube Network Route
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/test-direct-egress.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  direct_egress_check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install yt-dlp
+        run: python -m pip install 'yt-dlp[default]>=2026.10.26'
+      - name: Compare direct YouTube access without configured proxy
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          from youtube_source import _classify_error
+          cookies=os.getenv('YT_COOKIES','').strip()
+          if cookies:
+              Path('auth-cookies.txt').write_text(cookies.replace('\\n','\n')+'\n',encoding='utf-8')
+              Path('auth-cookies.txt').chmod(0o600)
+          for label, client, use_cookies in (
+              ('DIRECT_MWEB','mweb',False),
+              ('DIRECT_SAFARI','web_safari',False),
+              ('DIRECT_MWEB_COOKIES','mweb',True),
+          ):
+              if use_cookies and not cookies:
+                  print(label+': NO_COOKIES_CONFIGURED')
+                  continue
+              cmd=['yt-dlp','--ignore-config','--no-playlist','--simulate',
+                   '--format','ba/b','--socket-timeout','15','--retries','0',
+                   '--extractor-retries','0','--extractor-args',
+                   'youtube:player_client='+client]
+              if use_cookies:
+                  cmd+=['--cookies','auth-cookies.txt']
+              cmd+=['https://youtu.be/DggHblFwsC4']
+              try:
+                  p=subprocess.run(cmd,capture_output=True,text=True,timeout=40)
+                  code='PASS' if p.returncode==0 else _classify_error((p.stderr or '')+'\n'+(p.stdout or ''))
+                  print(label+': '+code)
+              except subprocess.TimeoutExpired:
+                  print(label+': TIMEOUT')
+          PY
