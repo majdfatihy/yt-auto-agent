@@ -18,6 +18,7 @@ concurrency:
 jobs:
   build_and_publish:
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
 
     steps:
       - name: سحب الأكواد
