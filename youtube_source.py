@@ -131,6 +131,9 @@ def _run_download(cmd: list[str], *, timeout=900, attempts=2):
                 (result.stdout or '')
             )
 
+            # Log only the classified reason, never stderr: yt-dlp output may
+            # contain signed URLs, cookie values or other sensitive data.
+            print(f'YOUTUBE_DOWNLOAD_DIAGNOSTIC: CODE={last_code}; EXIT={result.returncode}; ATTEMPT={attempt + 1}/{attempts}')
             if last_code != 'YOUTUBE_NETWORK_TEMPORARY':
                 raise YouTubeSourceError(last_code)
 
@@ -280,6 +283,7 @@ def download_youtube_video(
 
     profiles = _download_profiles(cookies_file)
     for profile_index, (cookies, clients) in enumerate(profiles):
+        print(f'YOUTUBE_VIDEO_PROFILE: INDEX={profile_index + 1}/{len(profiles)}; CLIENT={clients or "default"}; COOKIES={"yes" if cookies else "no"}')
         for format_index, fmt in enumerate(formats):
             cmd = _base_command(
                 cookies,
