@@ -1,10 +1,6 @@
 name: Diagnose Direct YouTube Network Route
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/test-direct-egress.yml
   workflow_dispatch:
 
 permissions:
