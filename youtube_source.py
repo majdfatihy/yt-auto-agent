@@ -81,9 +81,9 @@ def _base_command(cookies_file=None, *, player_clients=None):
         'yt-dlp',
         '--no-playlist',
         '--no-progress',
-        '--retries', '3',
-        '--fragment-retries', '3',
-        '--extractor-retries', '3',
+        '--retries', '1',
+        '--fragment-retries', '1',
+        '--extractor-retries', '1',
         '--socket-timeout', '25',
     ]
 
@@ -103,7 +103,7 @@ def _base_command(cookies_file=None, *, player_clients=None):
     return cmd
 
 
-def _run_download(cmd: list[str], *, timeout=900, attempts=2):
+def _run_download(cmd: list[str], *, timeout=180, attempts=2):
     """Retry transient errors only."""
     last_code = 'YOUTUBE_DOWNLOAD_FAILED'
 
@@ -235,7 +235,7 @@ def download_youtube_audio(
         ]
 
         try:
-            _run_download(cmd)
+            _run_download(cmd, timeout=150)
             return _existing_media(prefix, {'.mp3'})
 
         except YouTubeSourceError as exc:
@@ -301,7 +301,7 @@ def download_youtube_video(
             ]
 
             try:
-                _run_download(cmd)
+                _run_download(cmd, timeout=360)
                 return _existing_media(
                     prefix,
                     extensions,
