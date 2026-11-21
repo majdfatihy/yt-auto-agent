@@ -1,0 +1,99 @@
+name: YouTube Source Authentication Smoke Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - youtube_source.py
+      - agent.py
+      - .github/workflows/youtube-source-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  youtube_source_test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Install minimum YouTube dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          python -m pip install 'yt-dlp[default]>=2026.10.26' 'bgutil-ytdlp-pot-provider==2.0.2' requests
+          python -m py_compile youtube_source.py transcription_pipeline.py agent.py
+      - name: Start local PO token provider
+        run: |
+          docker run -d --init --name bgutil-smoke -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider:2.0.2
+          for attempt in $(seq 1 20); do
+            if curl --silent --max-time 2 http://127.0.0.1:4416/ >/dev/null 2>&1; then
+              echo 'PO_TOKEN_PROVIDER_READY: YES'
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'PO_TOKEN_PROVIDER_READY: NO'
+          exit 1
+      - name: Set authenticated route and verify proxy reachability
+        env:
+          YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          python - <<'PY'
+          import os
+          import shlex
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          import requests
+
+          proxy = os.getenv('YTDLP_PROXY', '').strip()
+          if proxy:
+              parsed = urlsplit(proxy)
+              if parsed.scheme not in {'http', 'https', 'socks5', 'socks5h'} or not parsed.hostname:
+                  raise SystemExit('YTDLP_PROXY_INVALID')
+              cfg = Path.home() / '.config' / 'yt-dlp' / 'config'
+              cfg.parent.mkdir(parents=True, exist_ok=True)
+              cfg.write_text('--proxy ' + shlex.quote(proxy) + '\n', encoding='utf-8')
+              cfg.chmod(0o600)
+              try:
+                  response = requests.get(
+                      'https://www.youtube.com/robots.txt',
+                      proxies={'http': proxy, 'https': proxy},
+                      timeout=(8, 12),
+                  )
+                  print('YTDLP_PROXY_CONNECTIVITY: HTTP_' + str(response.status_code))
+              except requests.RequestException as exc:
+                  print('YTDLP_PROXY_CONNECTIVITY: ERROR_' + type(exc).__name__)
+          else:
+              print('YTDLP_PROXY_CONNECTIVITY: NOT_CONFIGURED')
+          cookies = os.getenv('YT_COOKIES', '').strip()
+          if cookies:
+              Path('cookies.txt').write_text(cookies.replace('\\n', '\n') + '\n', encoding='utf-8')
+              Path('cookies.txt').chmod(0o600)
+          print('YOUTUBE_COOKIES_CONFIGURED: ' + ('YES' if cookies else 'NO'))
+          PY
+      - name: Try previously failed YouTube source with exact current code
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from youtube_source import download_youtube_audio, YouTubeSourceError
+
+          cookies = 'cookies.txt' if Path('cookies.txt').is_file() else None
+          try:
+              audio = download_youtube_audio(
+                  'https://youtu.be/DggHblFwsC4',
+                  cookies_file=cookies,
+              )
+              print('YOUTUBE_AUTH_SMOKE_TEST: PASS; AUDIO_BYTES=' + str(audio.stat().st_size))
+          except YouTubeSourceError as exc:
+              print('YOUTUBE_AUTH_SMOKE_TEST: FAIL; CODE=' + str(exc))
+              raise SystemExit(1)
+          PY
