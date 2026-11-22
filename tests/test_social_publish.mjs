@@ -23,19 +23,24 @@ try{
  await socialCommand(env,'/postimage https://example.com/a.jpg | New image');
  await socialCommand(env,'/targets facebook,instagram');
  await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/راجع المنشور/);
+ await assert.rejects(()=>socialCommand(env,'/postreview'),/Instagram يتطلب صورة أو فيديو/);
+ await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/راجع المنشور/);
+ await socialCommand(env,'/targets facebook');
  await socialCommand(env,'/postreview');
  await socialCommand(env,'/postpublish تأكيد');
  state=JSON.parse(data.get('social:draft:123'));
  assert.equal(state.results.facebook.status,'published');
- assert.equal(state.results.instagram.status,'needs_review');
+ assert.equal(state.results.instagram,undefined);
  assert.equal(await socialTick(env),'processed:0');
  await socialCommand(env,'/postlist');
- assert.equal(sent.at(-1).includes('needs_review'),true);
+ assert.equal(sent.at(-1).includes('published'),true);
  // Cancelled scheduled jobs must never publish, even after their due time.
  await socialCommand(env,'/post Cancelled scheduled job');
  await socialCommand(env,'/targets facebook');
  await socialCommand(env,'/postreview');
  await socialCommand(env,'/postschedule 2099-01-01T12:00Z');
+ assert.equal(JSON.parse(data.get('social:draft:123')).state,'pending_schedule');
+ await socialCommand(env,'/postscheduleconfirm تأكيد');
  const cancelledId=JSON.parse(data.get('social:draft:123')).id;
  await socialCommand(env,'/postcancel');
  let cancelled=JSON.parse(data.get('social:item:123:'+cancelledId));
@@ -49,6 +54,7 @@ try{
  await socialCommand(env,'/targets facebook');
  await socialCommand(env,'/postreview');
  await socialCommand(env,'/postschedule 2099-01-01T12:00Z');
+ await socialCommand(env,'/postscheduleconfirm تأكيد');
  const scheduledId=JSON.parse(data.get('social:draft:123')).id;
  let scheduled=JSON.parse(data.get('social:item:123:'+scheduledId));
  scheduled.due='2000-01-01T00:00:00Z';
