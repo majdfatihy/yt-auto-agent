@@ -23,8 +23,8 @@ try{
  await socialCommand(env,'/postimage https://example.com/a.jpg | New image');
  await socialCommand(env,'/targets facebook,instagram');
  await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/راجع المنشور/);
- await assert.rejects(()=>socialCommand(env,'/postreview'),/Instagram يتطلب صورة أو فيديو/);
- await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/راجع المنشور/);
+ await socialCommand(env,'/postreview');
+ await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/اربط بيانات اعتماد/);
  await socialCommand(env,'/targets facebook');
  await socialCommand(env,'/postreview');
  await socialCommand(env,'/postpublish تأكيد');
