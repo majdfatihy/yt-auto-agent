@@ -13,7 +13,7 @@ const message=async(e,t)=>{const r=await fetch('https://api.telegram.org/bot'+e.
 const read=async(e,k)=>JSON.parse(await e.BOT_STATE.get(k)||'null');
 const save=async(e,k,v)=>e.BOT_STATE.put(k,JSON.stringify(v));
 function supported(e,p){
- if(p==='facebook')return !!(e.FB_PAGE_ID&&e.FB_ACCESS_TOKEN);
+ if(p==='facebook')return !!((e.FB_PAGE_ID&&e.FB_ACCESS_TOKEN)||(e.GITHUB_PAT&&e.GITHUB_REPO));
  if(p==='instagram')return !!(e.IG_USER_ID&&e.IG_ACCESS_TOKEN);
  if(p==='threads')return !!(e.THREADS_USER_ID&&e.THREADS_ACCESS_TOKEN);
  return false;
@@ -25,8 +25,18 @@ async function call(base,path,token,body,method='POST'){
  if(!r.ok||j.error)throw Error((j.error?.message||'API HTTP '+r.status).slice(0,220));
  return j;
 }
+async function dispatchFacebook(e,d){
+ if(!e.GITHUB_PAT||!e.GITHUB_REPO)throw Error('GitHub dispatch credentials missing');
+ const response=await fetch('https://api.github.com/repos/'+e.GITHUB_REPO+'/dispatches',{
+  method:'POST',headers:{Authorization:'Bearer '+e.GITHUB_PAT,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'yt-auto-agent','Content-Type':'application/json'},
+  body:JSON.stringify({event_type:'publish_approved_facebook_post',client_payload:{id:d.id,type:d.type,text:d.text,url:d.url||''}})
+ });
+ if(response.status!==204)throw Error('GitHub Facebook dispatch HTTP '+response.status);
+ return {queued_external:true};
+}
 async function publishOne(e,p,d){
  if(p==='facebook'){
+  if(!(e.FB_PAGE_ID&&e.FB_ACCESS_TOKEN))return dispatchFacebook(e,d);
   const id=e.FB_PAGE_ID,t=e.FB_ACCESS_TOKEN;
   if(d.type==='text'||d.type==='link')return call(API,id+'/feed',t,{message:d.text,...(d.type==='link'?{link:d.url}:{})});
   if(d.type==='image')return call(API,id+'/photos',t,{url:d.url,caption:d.text});
@@ -133,7 +143,7 @@ async function execute(e,d){
   try{
    if(!supported(e,p))throw Error('Missing platform credentials');
    const result=await publishOne(e,p,d);
-   d.results[p]=result.pending_container?{status:'processing',container:result.pending_container}:{status:'published',id:result.id||result.post_id||null};
+   d.results[p]=result.queued_external?{status:'queued_external',note:'GitHub Actions must confirm actual publication'}:result.pending_container?{status:'processing',container:result.pending_container}:{status:'published',id:result.id||result.post_id||null};
   }catch(err){d.results[p]={status:'needs_review',error:String(err.message||err).slice(0,200)};}
   await storeItem(e,d);
  }
