@@ -80,7 +80,7 @@ function validate(d){
 export async function socialCommand(e,raw){
  const [command,...rest]=raw.trim().split(/\s+/);const arg=rest.join(' ').trim();
  const k=key(e);let d=await read(e,k);
- if(command==='/social')return message(e,'إدارة المنشورات:\n/post نص المنشور\n/postimage رابط_صورة_HTTPS | النص\n/postvideo رابط_فيديو_HTTPS | النص\n/postlink رابط_HTTPS | النص\n/targets facebook,instagram,threads\n/postreview\n/postpublish تأكيد\n/postschedule YYYY-MM-DDTHH:MMZ\n/postscheduleconfirm تأكيد\n/poststatus\n/postlist\n/postcancel\nمهم: المنشورات لا تُنشر قبل التأكيد. استخدم روابط وسائط عامة مباشرة.');
+ if(command==='/social')return message(e,'إدارة المنشورات:\n/post نص المنشور\n/postimage رابط_صورة_HTTPS | النص\n/postvideo رابط_فيديو_HTTPS | النص\n/postlink رابط_HTTPS | النص\n/targets facebook,instagram,threads\n/postreview\n/postpublish تأكيد\n/postschedule YYYY-MM-DDTHH:MMZ\n/postscheduleconfirm تأكيد\n/poststatus [post_id]\n/postlist\n/postcancel\nمهم: المنشورات لا تُنشر قبل التأكيد. استخدم روابط وسائط عامة مباشرة.');
  if(command==='/post'||['/postimage','/postvideo','/postlink'].includes(command)){
   const type=command==='/post'?'text':command.slice(5)==='image'?'image':command.slice(5)==='video'?'video':'link';
   const parts=type==='text'?['',arg]:arg.split(/\s*\|\s*/);
@@ -88,7 +88,14 @@ export async function socialCommand(e,raw){
   d={id:crypto.randomUUID(),type,url:parts[0],text:parts[1],targets:[],state:'draft',created_at:new Date().toISOString()};
   validate(d);await save(e,k,d);await storeItem(e,d);return message(e,'تم حفظ المسودة. اختر المنصات عبر /targets facebook,instagram,threads ثم /postreview');
  }
- if(command==='/poststatus')return message(e,d?JSON.stringify({id:d.id,state:d.state,targets:d.targets,results:d.results||{},due:d.due||null}):'لا توجد مسودة.');
+ if(command==='/postlist'){
+  const items=(await listItems(e)).slice(-20).reverse();
+  return message(e,items.length?items.map(x=>x.id+' | '+x.state+' | '+x.targets.join(',')+(x.due?' | '+x.due:'')).join('\\n'):'لا توجد منشورات محفوظة.');
+ }
+ if(command==='/poststatus'){
+  const selected=arg?await read(e,itemKey(e,arg)):d;
+  return message(e,selected?JSON.stringify({id:selected.id,state:selected.state,targets:selected.targets,results:selected.results||{},due:selected.due||null}):'لم يُعثر على المنشور.');
+ }
  if(command==='/postcancel'){if(d&&!['draft','scheduled','pending_schedule'].includes(d.state))throw Error('لا يمكن إلغاء طلب بدأ نشره.');if(d){d.state='cancelled';await storeItem(e,d);}await e.BOT_STATE.delete(k);return message(e,'تم إلغاء المسودة غير المنشورة.');}
  if(!d)throw Error('أنشئ مسودة أولًا عبر /post أو /postimage أو /postvideo.');
  if(command==='/targets'){
