@@ -37,8 +37,7 @@ async function publishOne(e,p,d){
   const id=e.IG_USER_ID,t=e.IG_ACCESS_TOKEN;
   const container=await call(API,id+'/media',t,d.type==='image'?{image_url:d.url,caption:d.text}:{media_type:'REELS',video_url:d.url,caption:d.text});
   // Video processing is asynchronous. Do not publish until FINISHED.
-  if(d.type==='video')return {pending_container:container.id};
-  return call(API,id+'/media_publish',t,{creation_id:container.id});
+  return {pending_container:container.id};
  }
  if(p==='threads'){
   const id=e.THREADS_USER_ID,t=e.THREADS_ACCESS_TOKEN;
@@ -46,8 +45,7 @@ async function publishOne(e,p,d){
     d.type==='video'?{media_type:'VIDEO',video_url:d.url,text:d.text}:
     {media_type:'TEXT',text:d.type==='link'?d.text+'\n'+d.url:d.text};
   const c=await call(THREADS,id+'/threads',t,b);
-  if(d.type==='video'||d.type==='image')return {pending_container:c.id};
-  return call(THREADS,id+'/threads_publish',t,{creation_id:c.id});
+  return {pending_container:c.id};
  }
  throw Error('Unsupported platform');
 }
@@ -72,7 +70,7 @@ function validate(d){
 export async function socialCommand(e,raw){
  const [command,...rest]=raw.trim().split(/\s+/);const arg=rest.join(' ').trim();
  const k=key(e);let d=await read(e,k);
- if(command==='/social')return message(e,'إدارة المنشورات:\n/post نص المنشور\n/postimage رابط_صورة_HTTPS | النص\n/postvideo رابط_فيديو_HTTPS | النص\n/postlink رابط_HTTPS | النص\n/targets facebook,instagram,threads\n/postreview\n/postpublish تأكيد\n/postschedule YYYY-MM-DDTHH:MM (UTC)\n/poststatus\n/postlist\n/postcancel\nمهم: المنشورات لا تُنشر قبل التأكيد. استخدم روابط وسائط عامة مباشرة.');
+ if(command==='/social')return message(e,'إدارة المنشورات:\n/post نص المنشور\n/postimage رابط_صورة_HTTPS | النص\n/postvideo رابط_فيديو_HTTPS | النص\n/postlink رابط_HTTPS | النص\n/targets facebook,instagram,threads\n/postreview\n/postpublish تأكيد\n/postschedule YYYY-MM-DDTHH:MMZ\n/postscheduleconfirm تأكيد\n/poststatus\n/postlist\n/postcancel\nمهم: المنشورات لا تُنشر قبل التأكيد. استخدم روابط وسائط عامة مباشرة.');
  if(command==='/post'||['/postimage','/postvideo','/postlink'].includes(command)){
   const type=command==='/post'?'text':command.slice(5)==='image'?'image':command.slice(5)==='video'?'video':'link';
   const parts=type==='text'?['',arg]:arg.split(/\s*\|\s*/);
@@ -81,7 +79,7 @@ export async function socialCommand(e,raw){
   validate(d);await save(e,k,d);await storeItem(e,d);return message(e,'تم حفظ المسودة. اختر المنصات عبر /targets facebook,instagram,threads ثم /postreview');
  }
  if(command==='/poststatus')return message(e,d?JSON.stringify({id:d.id,state:d.state,targets:d.targets,results:d.results||{},due:d.due||null}):'لا توجد مسودة.');
- if(command==='/postcancel'){if(d&&d.state!=='draft'&&d.state!=='scheduled')throw Error('لا يمكن إلغاء طلب بدأ نشره.');if(d){d.state='cancelled';await storeItem(e,d);}await e.BOT_STATE.delete(k);return message(e,'تم إلغاء المسودة غير المنشورة.');}
+ if(command==='/postcancel'){if(d&&!['draft','scheduled','pending_schedule'].includes(d.state))throw Error('لا يمكن إلغاء طلب بدأ نشره.');if(d){d.state='cancelled';await storeItem(e,d);}await e.BOT_STATE.delete(k);return message(e,'تم إلغاء المسودة غير المنشورة.');}
  if(!d)throw Error('أنشئ مسودة أولًا عبر /post أو /postimage أو /postvideo.');
  if(command==='/targets'){
   if(d.state!=='draft')throw Error('لا يمكن تعديل طلب بدأ نشره.');
@@ -91,7 +89,9 @@ export async function socialCommand(e,raw){
   return message(e,'المنصات: '+d.targets.map(p=>p+(supported(e,p)?' متصل':' يحتاج ربط')).join('، '));
  }
  if(command==='/postreview'){
+  if(d.state!=='draft')throw Error('لا يمكن مراجعة طلب بدأ نشره أو تمت جدولته.');
   validate(d);if(!d.targets.length)throw Error('اختر المنصات أولًا.');
+  if(d.targets.includes('instagram')&&!['image','video'].includes(d.type))throw Error('Instagram يتطلب صورة أو فيديو.');
   d.reviewed_at=new Date().toISOString();await save(e,k,d);await storeItem(e,d);
   return message(e,'معاينة المنشور:\n'+d.text+'\n'+(d.url||'')+'\nالنوع: '+d.type+'\nالمنصات: '+d.targets.join(', ')+'\nلن ينشر دون /postpublish تأكيد');
  }
@@ -100,15 +100,23 @@ export async function socialCommand(e,raw){
   const ms=Date.parse(arg);if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?:Z|[+-]\d\d:\d\d)?$/.test(arg)||!Number.isFinite(ms)||ms<Date.now()+120000)throw Error('أدخل موعدًا مستقبليًا ISO 8601 مع المنطقة الزمنية.');
   if(!d.targets.length)throw Error('اختر المنصات أولًا.');
   if(!d.reviewed_at)throw Error('راجع المنشور أولًا عبر /postreview قبل الجدولة.');
-  d.due=new Date(ms).toISOString();d.state='scheduled';await save(e,k,d);
+  d.due=new Date(ms).toISOString();d.state='pending_schedule';await save(e,k,d);
   await storeItem(e,d);
-  return message(e,'تم حفظ الجدولة: '+d.due+'؛ النشر حسب جاهزية ربط المنصات.');
+  return message(e,'موعد الجدولة: '+d.due+'؛ للتأكيد النهائي اكتب /postscheduleconfirm تأكيد. لا يوجد نشر قبل التأكيد.');
+ }
+ if(command==='/postscheduleconfirm'){
+  if(arg!=='تأكيد'||d.state!=='pending_schedule')throw Error('اكتب /postscheduleconfirm تأكيد بعد تحديد الموعد.');
+  if(Date.parse(d.due)<Date.now()+60000)throw Error('انتهت صلاحية الموعد. أنشئ جدولة جديدة.');
+  if(d.targets.some(p=>!supported(e,p)))throw Error('اربط بيانات اعتماد جميع المنصات قبل تأكيد الجدولة.');
+  d.state='scheduled';await save(e,k,d);await storeItem(e,d);
+  return message(e,'تم تأكيد الجدولة: '+d.due);
  }
  if(command==='/postpublish'){
   if(arg!=='تأكيد')throw Error('لتأكيد النشر اكتب /postpublish تأكيد');
   if(d.state!=='draft')throw Error('الطلب منشور أو قيد التنفيذ؛ لا تعيد الإرسال.');
   if(!d.targets.length)throw Error('اختر المنصات أولًا.');
   if(!d.reviewed_at)throw Error('راجع المنشور أولًا عبر /postreview قبل النشر.');
+  if(d.targets.some(p=>!supported(e,p)))throw Error('اربط بيانات اعتماد جميع المنصات قبل تأكيد النشر.');
   return execute(e,d);
  }
  return false;
