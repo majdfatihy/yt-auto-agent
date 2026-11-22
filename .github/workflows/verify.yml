@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - fix/inline-buttons-oauth-recovery
+      - main
   pull_request:
     branches:
       - main
@@ -20,11 +21,14 @@ jobs:
         with:
           python-version: '3.12'
       - name: JavaScript syntax
-        run: node --check worker.js
+        run: |
+          node --check worker.js
+          node --check social_publish.js
       - name: Python syntax
         run: python -m py_compile agent.py approved_publish.py clip_planner.py reel_metadata.py text_ai.py reel_title_quality.py source_video_info.py reel_history.py reel_full_plan.py reel_schedule.py telegram_reel_details.py reel_video_layout.py reel_topics.py reel_transcript_store.py direct_publish.py reel_preview_settings.py
       - name: Worker offline regression tests
         run: |
+          node tests/test_social_publish.mjs
           node tests/test_worker_stage2.mjs
           node tests/test_worker_approval.mjs
           node tests/test_worker_buttons.mjs
