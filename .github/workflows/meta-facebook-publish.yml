@@ -1,0 +1,47 @@
+name: Publish approved Facebook post
+on:
+  repository_dispatch:
+    types: [publish_approved_facebook_post]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish to Facebook Page using existing GitHub secrets
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_ACCESS_TOKEN: ${{ secrets.FB_ACCESS_TOKEN }}
+          POST_TYPE: ${{ github.event.client_payload.type }}
+          POST_TEXT: ${{ github.event.client_payload.text }}
+          POST_URL: ${{ github.event.client_payload.url }}
+          POST_ID: ${{ github.event.client_payload.id }}
+        run: |
+          python - <<'PY'
+          import json, os, sys, urllib.parse, urllib.request, urllib.error
+          page=os.getenv('FB_PAGE_ID','').strip()
+          token=os.getenv('FB_ACCESS_TOKEN','').strip()
+          kind=os.getenv('POST_TYPE','')
+          text=os.getenv('POST_TEXT','')
+          url=os.getenv('POST_URL','')
+          if not page or not token: sys.exit('FACEBOOK_CREDENTIALS_MISSING')
+          if kind not in ('text','link','image','video') or not text.strip(): sys.exit('INVALID_APPROVED_POST')
+          if kind!='text' and not url.startswith('https://'): sys.exit('INVALID_MEDIA_URL')
+          endpoint={'text':'feed','link':'feed','image':'photos','video':'videos'}[kind]
+          data={'access_token':token}
+          if kind=='text': data['message']=text
+          elif kind=='link': data.update(message=text,link=url)
+          elif kind=='image': data.update(caption=text,url=url)
+          else: data.update(description=text,file_url=url)
+          req=urllib.request.Request('https://graph.facebook.com/v22.0/'+urllib.parse.quote(page,safe='')+'/'+endpoint,data=urllib.parse.urlencode(data).encode(),method='POST')
+          try:
+              with urllib.request.urlopen(req,timeout=90) as resp:
+                  result=json.load(resp)
+          except urllib.error.HTTPError as exc:
+              # Do not leak access tokens or user post text into Actions logs.
+              print('FACEBOOK_PUBLISH_FAILED_HTTP_'+str(exc.code))
+              sys.exit(1)
+          if not result.get('id') and not result.get('post_id'): sys.exit('FACEBOOK_PUBLISH_NO_ID')
+          print('FACEBOOK_PUBLISHED_ID: '+str(result.get('post_id') or result['id']))
+          print('APPROVED_POST_ID: '+os.getenv('POST_ID',''))
+          PY
