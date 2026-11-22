@@ -65,5 +65,28 @@ try{
  assert.equal(JSON.parse(data.get('social:item:123:'+scheduledId)).state,'published');
  assert.equal(JSON.parse(data.get('social:draft:123')).id,newDraft.id);
  assert.equal(JSON.parse(data.get('social:draft:123')).state,'draft');
- console.log('social publishing offline tests passed');
+ // Existing GitHub Actions secrets can publish Facebook without copying tokens to Cloudflare.
+ const dispatches=[];
+ const bridgeEnv={...env,FB_PAGE_ID:undefined,FB_ACCESS_TOKEN:undefined,GITHUB_PAT:'test-pat',GITHUB_REPO:'owner/repo',BOT_STATE:{
+  get:async k=>data.get('bridge:'+k)||null,
+  put:async(k,v)=>{data.set('bridge:'+k,v)},
+  delete:async k=>{data.delete('bridge:'+k)}
+ }};
+ globalThis.fetch=async(url,opts)=>{
+  if(String(url).includes('api.telegram.org'))return {ok:true,json:async()=>({ok:true})};
+  if(String(url).includes('api.github.com/repos/owner/repo/dispatches')){
+   dispatches.push(JSON.parse(opts.body));return {status:204,ok:true};
+  }
+  throw Error('unexpected bridge network');
+ };
+ await socialCommand(bridgeEnv,'/post Facebook via existing GitHub secrets');
+ await socialCommand(bridgeEnv,'/targets facebook');
+ await socialCommand(bridgeEnv,'/postreview');
+ await socialCommand(bridgeEnv,'/postpublish تأكيد');
+ const bridgeState=JSON.parse(data.get('bridge:social:draft:123'));
+ assert.equal(bridgeState.results.facebook.status,'queued_external');
+ assert.equal(dispatches.length,1);
+ assert.equal(dispatches[0].event_type,'publish_approved_facebook_post');
+ assert.equal(dispatches[0].client_payload.text,'Facebook via existing GitHub secrets');
+  console.log('social publishing offline tests passed');
 }finally{globalThis.fetch=old;}
