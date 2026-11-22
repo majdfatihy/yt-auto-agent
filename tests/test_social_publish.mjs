@@ -34,6 +34,11 @@ try{
  assert.equal(await socialTick(env),'processed:0');
  await socialCommand(env,'/postlist');
  assert.equal(sent.at(-1).includes('published'),true);
+ const historicalId=state.id;
+ await socialCommand(env,'/poststatus '+historicalId);
+ assert.equal(JSON.parse(sent.at(-1)).id,historicalId);
+ await socialCommand(env,'/poststatus unknown-id');
+ assert.equal(sent.at(-1),'لم يُعثر على المنشور.');
  // Cancelled scheduled jobs must never publish, even after their due time.
  await socialCommand(env,'/post Cancelled scheduled job');
  await socialCommand(env,'/targets facebook');
