@@ -19,7 +19,7 @@ try{
  let state=JSON.parse(data.get('social:draft:123'));
  assert.equal(state.state,'published');
  assert.equal(state.results.facebook.id,'post123');
- await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/مسودة/);
+ await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/لا تعيد الإرسال/);
  await socialCommand(env,'/postimage https://example.com/a.jpg | New image');
  await socialCommand(env,'/targets facebook,instagram');
  await socialCommand(env,'/postpublish تأكيد');
