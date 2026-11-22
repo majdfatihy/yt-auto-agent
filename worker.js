@@ -571,6 +571,15 @@ async function editOrSend(env, messageId, text, markup) {
 async function showMenu(env, source, plan, title = '🎛️ لوحة بوت الريلز', messageId = null) {
   if(topicPlan(plan)&&sameSource(source,plan))return topicMenu(env,source,plan,title,messageId);
   if (!source.video_url && !plan?.clips?.length) title += '\nالمنشورات: /social';
+  if (!source.video_url && !plan?.clips?.length) {
+    await editOrSend(env,messageId,title+'\nاختر إدارة المنشورات أو أرسل رابط فيديو.',inline([
+      [{text:'📝 إدارة المنشورات',callback_data:'social:home'}],
+      [{text:'🔎 مراجعة منشور',callback_data:'social:review'},
+       {text:'📊 حالة المنشورات',callback_data:'social:status'}],
+      [{text:'🎬 الريلز',callback_data:'s:menu:'+await sourceKey(source)}]
+    ]));
+    return;
+  }
   return editOrSend(env, messageId, title + '\n' +
     (source.video_url ? 'المصدر محفوظ. ' : 'أرسل رابط YouTube أو Google Drive للبدء. ') +
     (plan && sameSource(source, plan) ? (LABELS[plan.status] || 'الحالة: ' + plan.status) : ''),
@@ -642,6 +651,14 @@ async function handleCallback(env, cb) {
   }
   await telegram(env, 'answerCallbackQuery', {callback_query_id: cb.id});
   const data = String(cb.data || '');
+  if (data.startsWith('social:')) {
+    const commands = {home:'/social',review:'/postreview',status:'/poststatus',publish:'/postpublish تأكيد',cancel:'/postcancel'};
+    const action = data.slice(7);
+    if (!commands[action]) return;
+    try { await socialCommand(env, commands[action]); }
+    catch (error) { await send(env,'⚠️ المنشورات: '+String(error.message||error).slice(0,220)); }
+    return;
+  }
   const pieces = data.split(':');
   if (pieces.length < 3 || !['p', 's'].includes(pieces[0])) return;
   const key = `source:${env.TELEGRAM_CHAT_ID}`;
