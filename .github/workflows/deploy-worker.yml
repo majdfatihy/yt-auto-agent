@@ -9,6 +9,7 @@ on:
       - main
     paths:
       - worker.js
+      - social_publish.js
       - wrangler.toml
       - .github/workflows/deploy-worker.yml
   workflow_dispatch:
@@ -36,6 +37,7 @@ jobs:
         run: |
           echo 'LIVE_WORKER_NOT_DEPLOYED: CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID missing.'
           echo 'The GitHub code was updated, but Cloudflare still needs an authorized deployment.'
+          exit 1
       - name: Deploy worker.js to the existing Cloudflare Worker
         if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
         run: |
