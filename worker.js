@@ -1060,7 +1060,7 @@ async function processUpdate(env, update) {
   const m = update.edited_message || update.message;
   if (!m || String(m.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return;
   const text = (m.text || '').trim();
-  if (/^\/(?:social|post|postimage|postvideo|postlink|targets|postreview|postpublish|postschedule|poststatus|postcancel)(?:@\w+)?(?:\s|$)/i.test(text)) {
+  if (/^\/(?:social|post|postimage|postvideo|postlink|targets|postreview|postpublish|postschedule|poststatus|postlist|postcancel)(?:@\w+)?(?:\s|$)/i.test(text)) {
     try { return await socialCommand(env, text.replace(/^\/([a-z]+)@\w+/i, '/$1')); }
     catch (error) { return send(env, '⚠️ المنشورات: ' + String(error.message || error).slice(0, 250)); }
   }
