@@ -87,17 +87,19 @@ export async function socialCommand(e,raw){
   if(d.state!=='draft')throw Error('لا يمكن تعديل طلب بدأ نشره.');
   const selected=arg.toLowerCase().split(/[,\s]+/).filter(Boolean);
   if(!selected.length||selected.some(p=>!PLATFORMS.includes(p)))throw Error('اختر facebook,instagram,threads');
-  d.targets=[...new Set(selected)];validate(d);await save(e,k,d);await storeItem(e,d);
+  d.targets=[...new Set(selected)];delete d.reviewed_at;validate(d);await save(e,k,d);await storeItem(e,d);
   return message(e,'المنصات: '+d.targets.map(p=>p+(supported(e,p)?' متصل':' يحتاج ربط')).join('، '));
  }
  if(command==='/postreview'){
-  validate(d);
+  validate(d);if(!d.targets.length)throw Error('اختر المنصات أولًا.');
+  d.reviewed_at=new Date().toISOString();await save(e,k,d);await storeItem(e,d);
   return message(e,'معاينة المنشور:\n'+d.text+'\n'+(d.url||'')+'\nالنوع: '+d.type+'\nالمنصات: '+d.targets.join(', ')+'\nلن ينشر دون /postpublish تأكيد');
  }
  if(command==='/postschedule'){
   if(d.state!=='draft')throw Error('الطلب لم يعد مسودة.');
   const ms=Date.parse(arg);if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?:Z|[+-]\d\d:\d\d)?$/.test(arg)||!Number.isFinite(ms)||ms<Date.now()+120000)throw Error('أدخل موعدًا مستقبليًا ISO 8601 مع المنطقة الزمنية.');
   if(!d.targets.length)throw Error('اختر المنصات أولًا.');
+  if(!d.reviewed_at)throw Error('راجع المنشور أولًا عبر /postreview قبل الجدولة.');
   d.due=new Date(ms).toISOString();d.state='scheduled';await save(e,k,d);
   await storeItem(e,d);
   return message(e,'تم حفظ الجدولة: '+d.due+'؛ النشر حسب جاهزية ربط المنصات.');
@@ -106,6 +108,7 @@ export async function socialCommand(e,raw){
   if(arg!=='تأكيد')throw Error('لتأكيد النشر اكتب /postpublish تأكيد');
   if(d.state!=='draft')throw Error('الطلب منشور أو قيد التنفيذ؛ لا تعيد الإرسال.');
   if(!d.targets.length)throw Error('اختر المنصات أولًا.');
+  if(!d.reviewed_at)throw Error('راجع المنشور أولًا عبر /postreview قبل النشر.');
   return execute(e,d);
  }
  return false;
