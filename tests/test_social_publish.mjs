@@ -22,6 +22,8 @@ try{
  await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/لا تعيد الإرسال/);
  await socialCommand(env,'/postimage https://example.com/a.jpg | New image');
  await socialCommand(env,'/targets facebook,instagram');
+ await assert.rejects(()=>socialCommand(env,'/postpublish تأكيد'),/راجع المنشور/);
+ await socialCommand(env,'/postreview');
  await socialCommand(env,'/postpublish تأكيد');
  state=JSON.parse(data.get('social:draft:123'));
  assert.equal(state.results.facebook.status,'published');
