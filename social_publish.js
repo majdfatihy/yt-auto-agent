@@ -3,6 +3,10 @@
 const PLATFORMS=['facebook','instagram','threads'];
 const key=e=>'social:draft:'+e.TELEGRAM_CHAT_ID;
 const itemKey=(e,id)=>'social:item:'+e.TELEGRAM_CHAT_ID+':'+id;
+const indexKey=e=>'social:index:'+e.TELEGRAM_CHAT_ID;
+async function indexItem(e,id){const ids=JSON.parse(await e.BOT_STATE.get(indexKey(e))||'[]');if(!ids.includes(id)){ids.push(id);await e.BOT_STATE.put(indexKey(e),JSON.stringify(ids.slice(-250)));}}
+async function storeItem(e,d){await save(e,itemKey(e,d.id),d);await indexItem(e,d.id);}
+async function listItems(e){const ids=JSON.parse(await e.BOT_STATE.get(indexKey(e))||'[]');return (await Promise.all(ids.map(id=>read(e,itemKey(e,id))))).filter(Boolean);}
 const API='https://graph.facebook.com/v22.0';
 const THREADS='https://graph.threads.net/v1.0';
 const message=async(e,t)=>{const r=await fetch('https://api.telegram.org/bot'+e.TELEGRAM_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:e.TELEGRAM_CHAT_ID,text:t})});if(!r.ok)throw Error('Telegram notification failed');};
@@ -42,7 +46,7 @@ async function publishOne(e,p,d){
     d.type==='video'?{media_type:'VIDEO',video_url:d.url,text:d.text}:
     {media_type:'TEXT',text:d.type==='link'?d.text+'\n'+d.url:d.text};
   const c=await call(THREADS,id+'/threads',t,b);
-  if(d.type==='video')return {pending_container:c.id};
+  if(d.type==='video'||d.type==='image')return {pending_container:c.id};
   return call(THREADS,id+'/threads_publish',t,{creation_id:c.id});
  }
  throw Error('Unsupported platform');
@@ -68,13 +72,13 @@ function validate(d){
 export async function socialCommand(e,raw){
  const [command,...rest]=raw.trim().split(/\s+/);const arg=rest.join(' ').trim();
  const k=key(e);let d=await read(e,k);
- if(command==='/social')return message(e,'إدارة المنشورات:\n/post نص المنشور\n/postimage رابط_صورة_HTTPS | النص\n/postvideo رابط_فيديو_HTTPS | النص\n/postlink رابط_HTTPS | النص\n/targets facebook,instagram,threads\n/postreview\n/postpublish تأكيد\n/postschedule YYYY-MM-DDTHH:MM (UTC)\n/poststatus\n/postcancel\nمهم: المنشورات لا تُنشر قبل التأكيد. استخدم روابط وسائط عامة مباشرة.');
+ if(command==='/social')return message(e,'إدارة المنشورات:\n/post نص المنشور\n/postimage رابط_صورة_HTTPS | النص\n/postvideo رابط_فيديو_HTTPS | النص\n/postlink رابط_HTTPS | النص\n/targets facebook,instagram,threads\n/postreview\n/postpublish تأكيد\n/postschedule YYYY-MM-DDTHH:MM (UTC)\n/poststatus\n/postlist\n/postcancel\nمهم: المنشورات لا تُنشر قبل التأكيد. استخدم روابط وسائط عامة مباشرة.');
  if(command==='/post'||['/postimage','/postvideo','/postlink'].includes(command)){
   const type=command==='/post'?'text':command.slice(5)==='image'?'image':command.slice(5)==='video'?'video':'link';
   const parts=type==='text'?['',arg]:arg.split(/\s*\|\s*/);
   if(parts.length!==2)throw Error('استخدم: '+command+' رابط_HTTPS | نص المنشور');
   d={id:crypto.randomUUID(),type,url:parts[0],text:parts[1],targets:[],state:'draft',created_at:new Date().toISOString()};
-  validate(d);await save(e,k,d);return message(e,'تم حفظ المسودة. اختر المنصات عبر /targets facebook,instagram,threads ثم /postreview');
+  validate(d);await save(e,k,d);await storeItem(e,d);return message(e,'تم حفظ المسودة. اختر المنصات عبر /targets facebook,instagram,threads ثم /postreview');
  }
  if(command==='/poststatus')return message(e,d?JSON.stringify({id:d.id,state:d.state,targets:d.targets,results:d.results||{},due:d.due||null}):'لا توجد مسودة.');
  if(command==='/postcancel'){if(d&&d.state!=='draft'&&d.state!=='scheduled')throw Error('لا يمكن إلغاء طلب بدأ نشره.');await e.BOT_STATE.delete(k);return message(e,'تم إلغاء المسودة غير المنشورة.');}
@@ -83,7 +87,7 @@ export async function socialCommand(e,raw){
   if(d.state!=='draft')throw Error('لا يمكن تعديل طلب بدأ نشره.');
   const selected=arg.toLowerCase().split(/[,\s]+/).filter(Boolean);
   if(!selected.length||selected.some(p=>!PLATFORMS.includes(p)))throw Error('اختر facebook,instagram,threads');
-  d.targets=[...new Set(selected)];await save(e,k,d);
+  d.targets=[...new Set(selected)];validate(d);await save(e,k,d);await storeItem(e,d);
   return message(e,'المنصات: '+d.targets.map(p=>p+(supported(e,p)?' متصل':' يحتاج ربط')).join('، '));
  }
  if(command==='/postreview'){
@@ -95,8 +99,7 @@ export async function socialCommand(e,raw){
   const ms=Date.parse(arg);if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?:Z|[+-]\d\d:\d\d)?$/.test(arg)||!Number.isFinite(ms)||ms<Date.now()+120000)throw Error('أدخل موعدًا مستقبليًا ISO 8601 مع المنطقة الزمنية.');
   if(!d.targets.length)throw Error('اختر المنصات أولًا.');
   d.due=new Date(ms).toISOString();d.state='scheduled';await save(e,k,d);
-  await save(e,itemKey(e,d.id),d);
-  await e.BOT_STATE.put('social:scheduled:'+e.TELEGRAM_CHAT_ID,d.id);
+  await storeItem(e,d);
   return message(e,'تم حفظ الجدولة: '+d.due+'؛ النشر حسب جاهزية ربط المنصات.');
  }
  if(command==='/postpublish'){
@@ -114,29 +117,41 @@ async function execute(e,d){
  d.state='publishing';d.results=d.results||{};await save(e,key(e),d);
  for(const p of d.targets){
   if(d.results[p])continue;
-  d.results[p]={status:'in_flight',at:new Date().toISOString()};await save(e,key(e),d);
+  d.results[p]={status:'in_flight',at:new Date().toISOString()};await storeItem(e,d);
   try{
    if(!supported(e,p))throw Error('Missing platform credentials');
    const result=await publishOne(e,p,d);
    d.results[p]=result.pending_container?{status:'processing',container:result.pending_container}:{status:'published',id:result.id||result.post_id||null};
   }catch(err){d.results[p]={status:'needs_review',error:String(err.message||err).slice(0,200)};}
-  await save(e,key(e),d);
+  await storeItem(e,d);
  }
  d.state=Object.values(d.results).every(x=>x.status==='published')?'published':'needs_review';
- await save(e,key(e),d);await save(e,itemKey(e,d.id),d);
+ await storeItem(e,d);const current=await read(e,key(e));if(current?.id===d.id)await save(e,key(e),d);
  return message(e,'نتائج المنشور '+d.id+':\n'+Object.entries(d.results).map(([p,v])=>p+': '+v.status+(v.error?' - '+v.error:'')).join('\n'));
 }
 export async function socialTick(e){
- const d=await read(e,key(e));if(!d)return 'empty';
- if(d.state==='scheduled'&&Date.parse(d.due)<=Date.now()){await execute(e,d);return 'scheduled_dispatched';}
- if(d.state==='needs_review'&&Object.values(d.results||{}).some(v=>v.status==='processing')){
+ const items=await listItems(e);
+ let processed=0;
+ for(const d of items){
+  if(d.state==='scheduled'&&Date.parse(d.due)<=Date.now()){
+   await execute(e,d);processed++;continue;
+  }
+  if(d.state!=='needs_review'||!Object.values(d.results||{}).some(v=>v.status==='processing'))continue;
   let changed=false;
   for(const [p,v] of Object.entries(d.results)){
    if(v.status!=='processing')continue;
-   try{const result=await finishPending(e,p,v.container);if(result){d.results[p]={status:'published',id:result.id||null};changed=true;}}
-   catch(err){d.results[p]={status:'needs_review',error:String(err.message||err).slice(0,200)};changed=true;}
+   try{
+    const result=await finishPending(e,p,v.container);
+    if(result){d.results[p]={status:'published',id:result.id||null};changed=true;}
+   }catch(err){d.results[p]={status:'needs_review',error:String(err.message||err).slice(0,200)};changed=true;}
   }
-  if(changed){d.state=Object.values(d.results).every(v=>v.status==='published')?'published':'needs_review';await save(e,key(e),d);await save(e,itemKey(e,d.id),d);await message(e,'تحديث حالة المنشور: '+JSON.stringify(d.results));}
+  if(changed){
+   d.state=Object.values(d.results).every(v=>v.status==='published')?'published':'needs_review';
+   await storeItem(e,d);
+   const current=await read(e,key(e));if(current?.id===d.id)await save(e,key(e),d);
+   await message(e,'تحديث حالة المنشور '+d.id+': '+JSON.stringify(d.results));
+   processed++;
+  }
  }
- return d.state;
+ return 'processed:'+processed;
 }
