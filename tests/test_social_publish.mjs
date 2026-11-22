@@ -26,6 +26,8 @@ try{
  state=JSON.parse(data.get('social:draft:123'));
  assert.equal(state.results.facebook.status,'published');
  assert.equal(state.results.instagram.status,'needs_review');
- assert.equal(await socialTick(env),'needs_review');
+ assert.equal(await socialTick(env),'processed:0');
+ await socialCommand(env,'/postlist');
+ assert.equal(sent.at(-1).includes('needs_review'),true);
  console.log('social publishing offline tests passed');
 }finally{globalThis.fetch=old;}
