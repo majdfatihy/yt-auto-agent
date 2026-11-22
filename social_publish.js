@@ -81,7 +81,7 @@ export async function socialCommand(e,raw){
   validate(d);await save(e,k,d);await storeItem(e,d);return message(e,'تم حفظ المسودة. اختر المنصات عبر /targets facebook,instagram,threads ثم /postreview');
  }
  if(command==='/poststatus')return message(e,d?JSON.stringify({id:d.id,state:d.state,targets:d.targets,results:d.results||{},due:d.due||null}):'لا توجد مسودة.');
- if(command==='/postcancel'){if(d&&d.state!=='draft'&&d.state!=='scheduled')throw Error('لا يمكن إلغاء طلب بدأ نشره.');await e.BOT_STATE.delete(k);return message(e,'تم إلغاء المسودة غير المنشورة.');}
+ if(command==='/postcancel'){if(d&&d.state!=='draft'&&d.state!=='scheduled')throw Error('لا يمكن إلغاء طلب بدأ نشره.');if(d){d.state='cancelled';await storeItem(e,d);}await e.BOT_STATE.delete(k);return message(e,'تم إلغاء المسودة غير المنشورة.');}
  if(!d)throw Error('أنشئ مسودة أولًا عبر /post أو /postimage أو /postvideo.');
  if(command==='/targets'){
   if(d.state!=='draft')throw Error('لا يمكن تعديل طلب بدأ نشره.');
@@ -114,7 +114,8 @@ async function execute(e,d){
  validate(d);
  if(!d.targets.length)throw Error('No platforms selected');
  // Reserve before external calls. Never retry uncertain outcomes automatically.
- d.state='publishing';d.results=d.results||{};await save(e,key(e),d);
+ d.state='publishing';d.results=d.results||{};await storeItem(e,d);
+ const currentDraft=await read(e,key(e));if(currentDraft?.id===d.id)await save(e,key(e),d);
  for(const p of d.targets){
   if(d.results[p])continue;
   d.results[p]={status:'in_flight',at:new Date().toISOString()};await storeItem(e,d);
@@ -134,7 +135,9 @@ export async function socialTick(e){
  let processed=0;
  for(const d of items){
   if(d.state==='scheduled'&&Date.parse(d.due)<=Date.now()){
-   await execute(e,d);processed++;continue;
+   const latest=await read(e,itemKey(e,d.id));
+   if(latest?.state!=='scheduled')continue;
+   await execute(e,latest);processed++;continue;
   }
   if(d.state!=='needs_review'||!Object.values(d.results||{}).some(v=>v.status==='processing'))continue;
   let changed=false;
