@@ -1,3 +1,4 @@
+import {socialCommand, socialTick} from './social_publish.js';
 // Telegram webhook: controlled preview, explicit approval and private YouTube publishing.
 // Cloudflare Secrets: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GITHUB_PAT, TELEGRAM_WEBHOOK_SECRET
 // Cloudflare Var: GITHUB_REPO (owner/repo); KV binding: BOT_STATE.
@@ -569,6 +570,7 @@ async function editOrSend(env, messageId, text, markup) {
 }
 async function showMenu(env, source, plan, title = '🎛️ لوحة بوت الريلز', messageId = null) {
   if(topicPlan(plan)&&sameSource(source,plan))return topicMenu(env,source,plan,title,messageId);
+  if (!source.video_url && !plan?.clips?.length) title += '\nالمنشورات: /social';
   return editOrSend(env, messageId, title + '\n' +
     (source.video_url ? 'المصدر محفوظ. ' : 'أرسل رابط YouTube أو Google Drive للبدء. ') +
     (plan && sameSource(source, plan) ? (LABELS[plan.status] || 'الحالة: ' + plan.status) : ''),
@@ -1041,6 +1043,10 @@ async function processUpdate(env, update) {
   const m = update.edited_message || update.message;
   if (!m || String(m.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return;
   const text = (m.text || '').trim();
+  if (/^\/(?:social|post|postimage|postvideo|postlink|targets|postreview|postpublish|postschedule|poststatus|postcancel)(?:@\w+)?(?:\s|$)/i.test(text)) {
+    try { return await socialCommand(env, text.replace(/^\/([a-z]+)@\w+/i, '/$1')); }
+    catch (error) { return send(env, '⚠️ المنشورات: ' + String(error.message || error).slice(0, 250)); }
+  }
   const cmd = text.startsWith('/') ? text.split(/\s+/)[0].split('@')[0].toLowerCase() : '';
   const link = getLink(m);
   let media = getMp4(m);
@@ -1395,6 +1401,7 @@ async function processUpdate(env, update) {
 }
 export default {
   async scheduled(controller,env,ctx) {
+    try { await socialTick(env); } catch(error) { console.error('SOCIAL_TICK_FAILED',String(error.message||error)); }
     if(!env.GITHUB_PAT||!env.GITHUB_REPO||!env.BOT_STATE) {
       console.error('REEL_CRON_CONFIG_MISSING');
       return;
